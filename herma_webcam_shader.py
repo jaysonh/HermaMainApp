@@ -5,6 +5,7 @@ Displays webcam feed embedded in a melting terrain shader.
 
 Requirements:
     pip install glfw PyOpenGL opencv-python numpy flask flask-cors requests
+    (If Python < 3.11) pip install tomli
 
 Controls:
     ESC    - Quit
@@ -35,7 +36,7 @@ except ModuleNotFoundError:
 
 try:
     import glfw
-    from OpenGL.GL import *
+    from OpenGL.GL import *  # noqa: F403
 except ImportError as e:
     print(f"Missing dependency: {e}")
     print("Install with: pip install glfw PyOpenGL opencv-python numpy flask flask-cors requests")
@@ -104,6 +105,42 @@ current_status = {
     "last_motion_time": None,
     "time_remaining": None,
 }
+
+# ─── Config helpers ─────────────────────────────────────────────────────────
+
+def _deep_get(d: dict, *keys, default=None):
+    cur = d
+    for k in keys:
+        if not isinstance(cur, dict) or k not in cur:
+            return default
+        cur = cur[k]
+    return cur
+
+
+def load_config_toml(config_path: Path) -> dict:
+    if not config_path.exists():
+        return {}
+    with config_path.open("rb") as f:
+        return tomllib.load(f)
+
+
+def pick_monitor_from_config(display_cfg: dict):
+    """
+    Uses:
+      [display].display_primary_monitor (bool)
+      [display].monitor_index (int, 0-based)
+    """
+    use_primary = bool(_deep_get(display_cfg, "display_primary_monitor", default=True))
+    if use_primary:
+        return glfw.get_primary_monitor()
+
+    monitors = glfw.get_monitors()
+    if not monitors:
+        return glfw.get_primary_monitor()
+
+    idx = int(_deep_get(display_cfg, "monitor_index", default=0))
+    idx = max(0, min(idx, len(monitors) - 1))
+    return monitors[idx]
 
 
 # ─── Vertex Shader ──────────────────────────────────────────────────────────
@@ -330,7 +367,6 @@ void main() {
     gl_Position = u_modelViewProjection * vec4(pos, 1.0);
 }
 """
-
 
 # ─── Fragment Shader ────────────────────────────────────────────────────────
 
@@ -662,7 +698,6 @@ void main() {
 }
 """
 
-
 # ─── HUD Overlay Shaders ───────────────────────────────────────────────────
 
 HUD_VERT_SRC = """
@@ -704,8 +739,7 @@ def render_hud_text(mode_str, rec_state, img_index, time_remaining, has_motion):
 
     cv2.putText(img, text, (12, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
                 (255, 255, 255, 255), 1, cv2.LINE_AA)
-    # flip vertically for GL texture origin
-    img = cv2.flip(img, 0)
+    img = cv2.flip(img, 0)  # flip vertically for GL texture origin
     return img
 
 
@@ -913,49 +947,33 @@ def make_ortho(l, r, b, t, near, far):
 
 
 # ─── Main ───────────────────────────────────────────────────────────────────
-def _deep_get(d: dict, *keys, default=None):
-    cur = d
-    for k in keys:
-        if not isinstance(cur, dict) or k not in cur:
-            return default
-        cur = cur[k]
-    return cur
 
-
-def load_config_toml(config_path: Path) -> dict:
-    if not config_path.exists():
-        return {}
-    with config_path.open("rb") as f:
-        return tomllib.load(f)
-
-
-def pick_monitor_from_config(display_cfg: dict):
-    """
-    Uses:
-      [display].display_primary_monitor (bool)
-      [display].monitor_index (int, 0-based)
-    """
-    use_primary = bool(_deep_get(display_cfg, "display_primary_monitor", default=True))
-    if use_primary:
-        return glfw.get_primary_monitor()
-
-    monitors = glfw.get_monitors()
-    if not monitors:
-        return glfw.get_primary_monitor()
-
-    idx = int(_deep_get(display_cfg, "monitor_index", default=0))
-    idx = max(0, min(idx, len(monitors) - 1))
-    return monitors[idx]
-    
-    
 def main():
-    # Parse optional camera index from command line
-    cam_idx = CAM_INDEX
-    if len(sys.argv) > 1:
+    script_dir = Path(__file__).resolve().parent
+
+    parser = argparse.ArgumentParser(description="Herma Webcam Shader")
+    parser.add_argument("--config", type=str, default=str(script_dir / "config.toml"),
+                        help="Path to config.toml")
+    parser.add_argument("camera_index", nargs="?", default=None,
+                        help="Optional camera index override (int)")
+    args = parser.parse_args()
+
+    cfg = load_config_toml(Path(args.config))
+
+    # Read TOML values with YOUR names
+    toml_cam_index = int(_deep_get(cfg, "video", "cam_index", default=CAM_INDEX))
+    display_cfg = _deep_get(cfg, "display", default={}) or {}
+    herma_host = str(_deep_get(cfg, "herma_server", "host", default="10.142.77.6"))
+    herma_port = int(_deep_get(cfg, "herma_server", "port", default=5009))
+    shader_cfg_path = str(_deep_get(cfg, "shader_settings", "shader_config_path", default="shader-settings.json"))
+
+    # CLI camera override
+    cam_idx = toml_cam_index
+    if args.camera_index is not None:
         try:
-            cam_idx = int(sys.argv[1])
+            cam_idx = int(args.camera_index)
         except ValueError:
-            print(f"Usage: {sys.argv[0]} [camera_index]")
+            print(f"Usage: {sys.argv[0]} [--config path/to/config.toml] [camera_index]")
             sys.exit(1)
 
     # Init GLFW
@@ -967,8 +985,8 @@ def main():
     glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 1)
     glfw.window_hint(glfw.AUTO_ICONIFY, glfw.FALSE)
 
-    # Start in fullscreen on the primary monitor
-    monitor = glfw.get_primary_monitor()
+    # Start in fullscreen on monitor from config
+    monitor = pick_monitor_from_config(display_cfg)
     mode = glfw.get_video_mode(monitor)
     win = glfw.create_window(mode.size.width, mode.size.height,
                              "Herma Webcam Shader", monitor, None)
@@ -979,6 +997,21 @@ def main():
 
     glfw.make_context_current(win)
     glfw.swap_interval(1)
+
+    # Build AWS upload URL from [herma_server] unless AWS_UPLOAD_URL env var overrides it
+    global AWS_UPLOAD_URL
+    AWS_UPLOAD_URL = os.environ.get("AWS_UPLOAD_URL", f"http://{herma_host}:{herma_port}/api/upload")
+
+    # Resolve shader settings path (relative to script dir)
+    shader_path = Path(shader_cfg_path)
+    if not shader_path.is_absolute():
+        shader_path = (script_dir / shader_path).resolve()
+
+    print(f"Config: {Path(args.config)}")
+    print(f"Camera index: {cam_idx}")
+    print(f"Herma server: {herma_host}:{herma_port}")
+    print(f"Upload URL: {AWS_UPLOAD_URL}")
+    print(f"Shader settings file: {shader_path}")
 
     # Track fullscreen state and saved windowed geometry for restore
     is_fullscreen = [True]
@@ -1095,6 +1128,7 @@ def main():
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+
     # Allocate initial texture
     blank = np.zeros((HUD_HEIGHT, HUD_WIDTH, 4), dtype=np.uint8)
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, HUD_WIDTH, HUD_HEIGHT, 0,
@@ -1114,12 +1148,10 @@ def main():
             mon = glfw.get_primary_monitor()
             vid = glfw.get_video_mode(mon)
             if is_fullscreen[0]:
-                # Switch to windowed, restore saved size/position
                 glfw.set_window_monitor(win, None,
                                         windowed_pos[0], windowed_pos[1],
                                         windowed_size[0], windowed_size[1], 0)
             else:
-                # Save current windowed geometry before going fullscreen
                 windowed_pos[0], windowed_pos[1] = glfw.get_window_pos(win)
                 windowed_size[0], windowed_size[1] = glfw.get_window_size(win)
                 glfw.set_window_monitor(win, mon, 0, 0,
@@ -1428,6 +1460,7 @@ def main():
     cap.release()
     glfw.terminate()
     print("Done.")
+
 
 if __name__ == "__main__":
     main()
