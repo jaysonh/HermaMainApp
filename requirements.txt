@@ -1,0 +1,7 @@
+Flask==3.1.2
+flask_cors==6.0.2
+glfw==2.10.0
+numpy==2.4.2
+opencv_python==4.13.0.90
+PyOpenGL==3.1.10
+Requests==2.32.5
