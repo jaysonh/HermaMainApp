@@ -20,12 +20,18 @@ import ctypes
 from datetime import datetime
 from pathlib import Path
 import os
+import argparse
 
 import numpy as np
 import cv2
 import requests
 from flask import Flask, Response, jsonify, request as flask_request
 from flask_cors import CORS
+
+try:
+    import tomllib  # Python 3.11+
+except ModuleNotFoundError:
+    import tomli as tomllib  # pip install tomli
 
 try:
     import glfw
@@ -907,7 +913,41 @@ def make_ortho(l, r, b, t, near, far):
 
 
 # ─── Main ───────────────────────────────────────────────────────────────────
+def _deep_get(d: dict, *keys, default=None):
+    cur = d
+    for k in keys:
+        if not isinstance(cur, dict) or k not in cur:
+            return default
+        cur = cur[k]
+    return cur
 
+
+def load_config_toml(config_path: Path) -> dict:
+    if not config_path.exists():
+        return {}
+    with config_path.open("rb") as f:
+        return tomllib.load(f)
+
+
+def pick_monitor_from_config(display_cfg: dict):
+    """
+    Uses:
+      [display].display_primary_monitor (bool)
+      [display].monitor_index (int, 0-based)
+    """
+    use_primary = bool(_deep_get(display_cfg, "display_primary_monitor", default=True))
+    if use_primary:
+        return glfw.get_primary_monitor()
+
+    monitors = glfw.get_monitors()
+    if not monitors:
+        return glfw.get_primary_monitor()
+
+    idx = int(_deep_get(display_cfg, "monitor_index", default=0))
+    idx = max(0, min(idx, len(monitors) - 1))
+    return monitors[idx]
+    
+    
 def main():
     # Parse optional camera index from command line
     cam_idx = CAM_INDEX
@@ -1388,7 +1428,6 @@ def main():
     cap.release()
     glfw.terminate()
     print("Done.")
-
 
 if __name__ == "__main__":
     main()
