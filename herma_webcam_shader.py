@@ -767,7 +767,7 @@ def upload_sequence(seq_dir: Path, image_count: int):
     if image_count == 0:
         print("No images to upload.")
         return False
-    image_files = sorted(seq_dir.glob("img_*.jpg"))
+    image_files = sorted(seq_dir.glob("img_*.webp"))
     actual_image_count = len(image_files)
     if actual_image_count == 0:
         print(f"No images found in {seq_dir}")
@@ -779,7 +779,7 @@ def upload_sequence(seq_dir: Path, image_count: int):
         for img_path in image_files:
             fh = open(img_path, "rb")
             file_handles.append(fh)
-            files.append(("files", (img_path.name, fh, "image/jpeg")))
+            files.append(("files", (img_path.name, fh, "image/webp")))
         response = requests.post(
             AWS_UPLOAD_URL,
             headers={"X-API-Key": AWS_UPLOAD_KEY},
@@ -1294,8 +1294,9 @@ def main():
             # Capture frame to disk
             if recording and seq_dir is not None:
                 if (now - last_capture_time) >= CAPTURE_INTERVAL:
-                    out_path = seq_dir / f"img_{img_index:05d}.jpg"
-                    cv2.imwrite(str(out_path), frame)
+                    out_path = seq_dir / f"img_{img_index:05d}.webp"
+                    cv2.imwrite(str(out_path), frame,
+                                [int(cv2.IMWRITE_WEBP_QUALITY), 80])
                     img_index += 1
                     last_capture_time = now
 
