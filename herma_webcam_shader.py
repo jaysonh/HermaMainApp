@@ -1265,11 +1265,7 @@ def main():
             elif cmd == "stop":
                 should_record = False
             else:
-                if has_motion:
-                    should_record = True
-                    last_motion_time = now
-                elif recording and (now - last_motion_time) < STILL_SECONDS_TO_STOP:
-                    should_record = True
+                should_record = False
 
             # Start new sequence
             if should_record and not recording:

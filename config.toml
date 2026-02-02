@@ -1,0 +1,14 @@
+[video] 
+cam_index = 1 
+[display] 
+# If true, fullscreen starts on primary monitor. 
+# If false, you can optionally set monitor_index (0-based). If missing, defaults to primary anyway. 
+display_primary_monitor = true 
+monitor_index = 0 
+
+[herma_server] 
+host = "10.142.77.6" 
+port = 5009 
+
+[shader_settings]
+shader_config_path = "shader-settings.json"
