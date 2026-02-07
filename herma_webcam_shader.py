@@ -88,12 +88,8 @@ API_KEY = os.environ.get("MONITOR_API_KEY", "jayson")
 AWS_UPLOAD_URL = os.environ.get("AWS_UPLOAD_URL", "http://10.142.77.6:5009/api/upload")
 AWS_UPLOAD_KEY = os.environ.get("AWS_UPLOAD_KEY", "jayson")
 
-ONBOARDING_TEXT = """Welcome to Herma Webcam Shader
-
-Please position yourself in front of the camera
-and wait for the experience to begin.
-
-The shader will respond to your movements."""
+ONBOARDING_TEXT = """Welcome to Hermaphrogenesis
+blah blah blah blah"""
 
 ORGANISM_TEXT = """Thank you for your participation
 
@@ -131,6 +127,56 @@ show_chat = False
 chat_messages = []  # List of {"sender": "organism"|"user", "message": "text", "timestamp": float}
 chat_lock = threading.Lock()
 MAX_CHAT_MESSAGES = 10  # Maximum messages to display on screen
+
+# Restart request flag (set by Flask thread, acted on by render loop)
+restart_requested = False
+restart_lock = threading.Lock()
+
+def request_restart():
+    global restart_requested
+    with restart_lock:
+        restart_requested = True
+
+def consume_restart_request() -> bool:
+    global restart_requested
+    with restart_lock:
+        if restart_requested:
+            restart_requested = False
+            return True
+        return False
+
+def reset_to_initial_state():
+    """Reset all shared state back to initial startup defaults."""
+    global manual_record_command, recording_start_time, current_status
+    global intro_state, show_organism, show_chat, chat_messages, latest_jpeg
+
+    # Stop recording mode + timers
+    with control_lock:
+        manual_record_command = None
+        recording_start_time = None
+        current_status = {
+            "recording": False,
+            "sequence_dir": None,
+            "images_captured": 0,
+            "last_motion_time": None,
+            "time_remaining": None,
+        }
+
+    # Reset intro back to logo
+    with intro_lock:
+        intro_state = "logo"
+
+    # Hide overlays
+    with organism_lock:
+        show_organism = False
+
+    with chat_lock:
+        show_chat = False
+        chat_messages = []
+
+    # Clear MJPEG frame
+    with jpeg_lock:
+        latest_jpeg = None
 
 # ─── Config helpers ─────────────────────────────────────────────────────────
 
@@ -827,19 +873,19 @@ def render_chat_messages(messages, width, height):
     message_spacing = 15
     max_bubble_width = int(width * 0.4)  # 40% of screen width per message
     
-    # Calculate positions from top to bottom
-    y_position = 50  # Start from top
-    
-    # Render messages from oldest to newest (top to bottom)
+    margin = 50
+
+    # First pass: compute bubble layout for every message (oldest to newest)
+    bubble_data = []
     for msg in messages:
         sender = msg.get("sender", "user")
         text = msg.get("message", "")
-        
+
         # Wrap text to fit in bubble
         words = text.split()
         lines = []
         current_line = ""
-        
+
         for word in words:
             test_line = current_line + " " + word if current_line else word
             text_size = cv2.getTextSize(test_line, font, font_scale, thickness)[0]
@@ -851,16 +897,44 @@ def render_chat_messages(messages, width, height):
                 current_line = word
         if current_line:
             lines.append(current_line)
-        
+
         # Calculate bubble dimensions
         max_line_width = max([cv2.getTextSize(line, font, font_scale, thickness)[0][0] for line in lines])
         bubble_width = max_line_width + (bubble_padding * 2)
         bubble_height = len(lines) * 35 + (bubble_padding * 2)
-        
-        # Don't render if it would go off bottom of screen
-        if y_position + bubble_height > height - 50:
-            break
-        
+
+        bubble_data.append({
+            'sender': sender,
+            'lines': lines,
+            'bubble_width': bubble_width,
+            'bubble_height': bubble_height,
+        })
+
+    # Total height of all messages + typing indicator
+    dots_indicator_height = 35 + (bubble_padding * 2)
+    total_height = (sum(b['bubble_height'] for b in bubble_data)
+                    + message_spacing * len(bubble_data)
+                    + dots_indicator_height)
+
+    # Anchor newest message at the bottom of the image; older messages above it.
+    # After cv2.flip this puts newest at the bottom of the GL screen.
+    # If total_height exceeds the available space, start_y goes negative and
+    # old messages are clipped off the top (= top of GL screen after flip).
+    start_y = min(margin, (height - margin) - total_height)
+    y_position = start_y
+
+    for data in bubble_data:
+        bh = data['bubble_height']
+
+        # Skip messages fully above the image (fallen off the top)
+        if y_position + bh < 0:
+            y_position += bh + message_spacing
+            continue
+
+        bw = data['bubble_width']
+        sender = data['sender']
+        lines = data['lines']
+
         # Calculate bubble position based on sender
         if sender == "organism":
             # Left side - organism messages
@@ -869,29 +943,57 @@ def render_chat_messages(messages, width, height):
             bubble_color = (40, 80, 40, 220)   # Dark green background
         else:
             # Right side - user messages
-            bubble_x = width - bubble_width - padding
+            bubble_x = width - bw - padding
             text_color = (200, 220, 255, 255)  # Light blue
             bubble_color = (40, 60, 100, 220)  # Dark blue background
-        
+
         bubble_y = y_position
-        
-        # Draw bubble background with rounded corners effect
-        cv2.rectangle(img, 
+
+        # Draw bubble background
+        cv2.rectangle(img,
                      (bubble_x, bubble_y),
-                     (bubble_x + bubble_width, bubble_y + bubble_height),
+                     (bubble_x + bw, bubble_y + bh),
                      bubble_color, -1)
-        
+
         # Draw text lines
         text_y = bubble_y + bubble_padding + 25
         for line in lines:
-            cv2.putText(img, line, 
+            cv2.putText(img, line,
                        (bubble_x + bubble_padding, text_y),
                        font, font_scale, text_color, thickness, cv2.LINE_AA)
             text_y += 35
-        
+
         # Move down for next message
-        y_position = bubble_y + bubble_height + message_spacing
-    
+        y_position = bubble_y + bh + message_spacing
+
+    # Animated typing indicator: show on the opposite side of the last message
+    last_sender = messages[-1].get("sender", "user")
+    dots_sender = "organism" if last_sender == "user" else "user"
+    dot_count = int(time.time() * 2) % 3 + 1  # cycles 1,2,3
+    dots_text = "." * dot_count
+
+    min_dots_width = cv2.getTextSize("...", font, font_scale, thickness)[0][0]
+    dots_bw = min_dots_width + (bubble_padding * 2)
+    dots_bh = 35 + (bubble_padding * 2)
+
+    if dots_sender == "organism":
+        dots_x = padding
+        dots_text_color = (200, 255, 200, 255)
+        dots_bubble_color = (40, 80, 40, 220)
+    else:
+        dots_x = width - dots_bw - padding
+        dots_text_color = (200, 220, 255, 255)
+        dots_bubble_color = (40, 60, 100, 220)
+
+    if y_position + dots_bh >= 0:
+        cv2.rectangle(img,
+                     (dots_x, y_position),
+                     (dots_x + dots_bw, y_position + dots_bh),
+                     dots_bubble_color, -1)
+        cv2.putText(img, dots_text,
+                   (dots_x + bubble_padding, y_position + bubble_padding + 25),
+                   font, font_scale, dots_text_color, thickness, cv2.LINE_AA)
+
     img = cv2.flip(img, 0)  # flip vertically for GL texture origin
     return img
 
@@ -986,6 +1088,14 @@ def stream():
     return Response(mjpeg_generator(),
                     mimetype="multipart/x-mixed-replace; boundary=frame")
 
+@flask_app.post("/api/end")
+@localhost_or_api_key
+def api_end():
+    # Just request restart; render loop will perform it safely
+    print("received /api/end");
+    request_restart()
+    print("API: End requested - restarting to initial state")
+    return jsonify({"status": "ok", "action": "restart"})
 
 @flask_app.post("/api/start")
 @localhost_or_api_key
@@ -1534,7 +1644,7 @@ def main():
     threading.Thread(target=run_web_server, daemon=True).start()
 
     print(f"Web server: http://{WEB_HOST}:{WEB_PORT}/")
-    print(f"API endpoints: /api/start, /api/stop, /api/auto, /api/status, /api/begin, /api/next")
+    print(f"API endpoints: /api/start, /api/stop, /api/auto, /api/status, /api/begin, /api/next, /api/end")
     print(f"Upload URL: {AWS_UPLOAD_URL}")
     print(f"Recording timeout: {RECORDING_TIMEOUT}s, Capture interval: {CAPTURE_INTERVAL}s")
     print("Intro state: logo (waiting for /api/begin)")
@@ -1556,6 +1666,35 @@ def main():
         # Get current organism state
         with organism_lock:
             current_show_organism = show_organism
+        
+        if consume_restart_request():
+            print("Restarting to initial state...")
+
+            reset_to_initial_state()
+
+            # Reset local loop state too
+            bg = None
+            recording = False
+            seq_dir = None
+            last_motion_time = 0.0
+            last_capture_time = 0.0
+            img_index = 0
+            last_stream_time = 0.0
+            api_triggered_recording = False
+            last_cmd = None
+            hud_mode = "AUTO"
+            hud_state = "IDLE"
+            hud_time_remaining = None
+            hud_has_motion = False
+
+            # Clear webcam texture (avoid stale frame)
+            black_frame = np.zeros((cam_h, cam_w, 3), dtype=np.uint8)
+            black_frame = cv2.flip(black_frame, 0)
+            glBindTexture(GL_TEXTURE_2D, tex)
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, cam_w, cam_h, 0,
+                         GL_RGB, GL_UNSIGNED_BYTE, black_frame)
+    
+            continue
 
         # Clear webcam texture if chat or organism is showing
         if current_show_chat or current_show_organism:
