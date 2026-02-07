@@ -4,7 +4,7 @@
 Displays webcam feed embedded in a melting terrain shader.
 
 Requirements:
-    pip install glfw PyOpenGL opencv-python numpy flask flask-cors requests
+    pip install glfw PyOpenGL opencv-python numpy flask flask-cors requests Pillow
     (If Python < 3.11) pip install tomli
 
 Controls:
@@ -28,6 +28,7 @@ import cv2
 import requests
 from flask import Flask, Response, jsonify, request as flask_request
 from flask_cors import CORS
+from PIL import Image
 
 try:
     import tomllib  # Python 3.11+
@@ -39,7 +40,7 @@ try:
     from OpenGL.GL import *  # noqa: F403
 except ImportError as e:
     print(f"Missing dependency: {e}")
-    print("Install with: pip install glfw PyOpenGL opencv-python numpy flask flask-cors requests")
+    print("Install with: pip install glfw PyOpenGL opencv-python numpy flask flask-cors requests Pillow")
     sys.exit(1)
 
 # ─── Configuration ──────────────────────────────────────────────────────────
@@ -87,6 +88,17 @@ API_KEY = os.environ.get("MONITOR_API_KEY", "jayson")
 AWS_UPLOAD_URL = os.environ.get("AWS_UPLOAD_URL", "http://10.142.77.6:5009/api/upload")
 AWS_UPLOAD_KEY = os.environ.get("AWS_UPLOAD_KEY", "jayson")
 
+ONBOARDING_TEXT = """Welcome to Herma Webcam Shader
+
+Please position yourself in front of the camera
+and wait for the experience to begin.
+
+The shader will respond to your movements."""
+
+ORGANISM_TEXT = """Thank you for your participation
+
+Processing your data..."""
+
 # ─── Flask App & Shared State ───────────────────────────────────────────────
 
 flask_app = Flask(__name__)
@@ -105,6 +117,20 @@ current_status = {
     "last_motion_time": None,
     "time_remaining": None,
 }
+
+# Intro state: "logo", "instructions", "running"
+intro_state = "logo"
+intro_lock = threading.Lock()
+
+# Organism display state
+show_organism = False
+organism_lock = threading.Lock()
+
+# Chat display state
+show_chat = False
+chat_messages = []  # List of {"sender": "organism"|"user", "message": "text", "timestamp": float}
+chat_lock = threading.Lock()
+MAX_CHAT_MESSAGES = 10  # Maximum messages to display on screen
 
 # ─── Config helpers ─────────────────────────────────────────────────────────
 
@@ -743,6 +769,117 @@ def render_hud_text(mode_str, rec_state, img_index, time_remaining, has_motion):
     return img
 
 
+def render_overlay_text(text, width, height):
+    """Render multi-line text centered on a semi-transparent background."""
+    img = np.zeros((height, width, 4), dtype=np.uint8)
+    img[:, :, 3] = 200  # semi-transparent background
+
+    lines = text.strip().split('\n')
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 1.0
+    thickness = 2
+    line_height = 50
+
+    # Calculate total text block height
+    total_height = len(lines) * line_height
+    y_start = (height - total_height) // 2 + line_height
+
+    for i, line in enumerate(lines):
+        text_size = cv2.getTextSize(line, font, font_scale, thickness)[0]
+        x = (width - text_size[0]) // 2
+        y = y_start + i * line_height
+        cv2.putText(img, line, (x, y), font, font_scale,
+                    (255, 255, 255, 255), thickness, cv2.LINE_AA)
+
+    img = cv2.flip(img, 0)  # flip vertically for GL texture origin
+    return img
+
+
+def render_chat_messages(messages, width, height):
+    """Render chat messages in bubble style - organism on left, user on right."""
+    img = np.zeros((height, width, 4), dtype=np.uint8)
+    img[:, :, 3] = 180  # semi-transparent background
+    
+    if not messages:
+        return img
+    
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.7
+    thickness = 2
+    padding = 20
+    bubble_padding = 15
+    message_spacing = 15
+    max_bubble_width = int(width * 0.4)  # 40% of screen width per message
+    
+    # Calculate positions from top to bottom
+    y_position = 50  # Start from top
+    
+    # Render messages from oldest to newest (top to bottom)
+    for msg in messages:
+        sender = msg.get("sender", "user")
+        text = msg.get("message", "")
+        
+        # Wrap text to fit in bubble
+        words = text.split()
+        lines = []
+        current_line = ""
+        
+        for word in words:
+            test_line = current_line + " " + word if current_line else word
+            text_size = cv2.getTextSize(test_line, font, font_scale, thickness)[0]
+            if text_size[0] <= max_bubble_width - (bubble_padding * 2):
+                current_line = test_line
+            else:
+                if current_line:
+                    lines.append(current_line)
+                current_line = word
+        if current_line:
+            lines.append(current_line)
+        
+        # Calculate bubble dimensions
+        max_line_width = max([cv2.getTextSize(line, font, font_scale, thickness)[0][0] for line in lines])
+        bubble_width = max_line_width + (bubble_padding * 2)
+        bubble_height = len(lines) * 35 + (bubble_padding * 2)
+        
+        # Don't render if it would go off bottom of screen
+        if y_position + bubble_height > height - 50:
+            break
+        
+        # Calculate bubble position based on sender
+        if sender == "organism":
+            # Left side - organism messages
+            bubble_x = padding
+            text_color = (200, 255, 200, 255)  # Light green
+            bubble_color = (40, 80, 40, 220)   # Dark green background
+        else:
+            # Right side - user messages
+            bubble_x = width - bubble_width - padding
+            text_color = (200, 220, 255, 255)  # Light blue
+            bubble_color = (40, 60, 100, 220)  # Dark blue background
+        
+        bubble_y = y_position
+        
+        # Draw bubble background with rounded corners effect
+        cv2.rectangle(img, 
+                     (bubble_x, bubble_y),
+                     (bubble_x + bubble_width, bubble_y + bubble_height),
+                     bubble_color, -1)
+        
+        # Draw text lines
+        text_y = bubble_y + bubble_padding + 25
+        for line in lines:
+            cv2.putText(img, line, 
+                       (bubble_x + bubble_padding, text_y),
+                       font, font_scale, text_color, thickness, cv2.LINE_AA)
+            text_y += 35
+        
+        # Move down for next message
+        y_position = bubble_y + bubble_height + message_spacing
+    
+    img = cv2.flip(img, 0)  # flip vertically for GL texture origin
+    return img
+
+
 # ─── Flask Routes & Recording Helpers ───────────────────────────────────────
 
 def localhost_or_api_key(f):
@@ -837,10 +974,15 @@ def stream():
 @flask_app.post("/api/start")
 @localhost_or_api_key
 def api_start():
-    global manual_record_command, recording_start_time
+    global manual_record_command, recording_start_time, show_organism, show_chat, chat_messages
     with control_lock:
         manual_record_command = "start"
         recording_start_time = time.time()
+    with organism_lock:
+        show_organism = False
+    with chat_lock:
+        show_chat = False
+        chat_messages = []
     print(f"API: Start recording (timeout in {RECORDING_TIMEOUT}s)")
     return jsonify({"status": "ok", "action": "start_recording",
                     "timeout_seconds": RECORDING_TIMEOUT,
@@ -850,12 +992,16 @@ def api_start():
 @flask_app.post("/api/stop")
 @localhost_or_api_key
 def api_stop():
-    global manual_record_command, recording_start_time
+    global manual_record_command, recording_start_time, show_organism, show_chat
     with control_lock:
         manual_record_command = "stop"
         recording_start_time = None
-    print("API: Stop recording requested")
-    return jsonify({"status": "ok", "action": "stop_recording"})
+    with organism_lock:
+        show_organism = True
+    with chat_lock:
+        show_chat = False
+    print("API: Stop recording requested - showing organism display")
+    return jsonify({"status": "ok", "action": "stop_recording", "show_organism": True})
 
 
 @flask_app.post("/api/auto")
@@ -868,6 +1014,80 @@ def api_auto():
     return jsonify({"status": "ok", "action": "auto_mode"})
 
 
+@flask_app.post("/api/begin")
+@localhost_or_api_key
+def api_begin():
+    global intro_state
+    with intro_lock:
+        if intro_state == "logo":
+            intro_state = "instructions"
+            print("API: Transitioning from logo to instructions")
+            return jsonify({"status": "ok", "action": "show_instructions",
+                            "state": intro_state})
+        else:
+            return jsonify({"status": "error", "message": "Not in logo state",
+                            "current_state": intro_state}), 400
+
+
+@flask_app.post("/api/next")
+@localhost_or_api_key
+def api_next():
+    global intro_state
+    with intro_lock:
+        if intro_state == "instructions":
+            intro_state = "running"
+            print("API: Transitioning from instructions to running")
+            return jsonify({"status": "ok", "action": "start_webcam",
+                            "state": intro_state})
+        else:
+            return jsonify({"status": "error", "message": "Not in instructions state",
+                            "current_state": intro_state}), 400
+
+
+@flask_app.post("/api/chat")
+@localhost_or_api_key
+def api_chat():
+    global show_chat, chat_messages, show_organism
+    data = flask_request.get_json() or {}
+    message = data.get("message", "Chat message")
+    sender = data.get("sender", "user")  # "organism" or "user"
+    
+    # Validate sender
+    if sender not in ["organism", "user"]:
+        return jsonify({"error": "sender must be 'organism' or 'user'"}), 400
+    
+    with chat_lock:
+        show_chat = True
+        # Add new message to list
+        chat_messages.append({
+            "sender": sender,
+            "message": message,
+            "timestamp": time.time()
+        })
+        # Keep only last MAX_CHAT_MESSAGES
+        if len(chat_messages) > MAX_CHAT_MESSAGES:
+            chat_messages = chat_messages[-MAX_CHAT_MESSAGES:]
+    
+    with organism_lock:
+        show_organism = False
+    
+    print(f"API: Chat message from {sender}: {message}")
+    return jsonify({"status": "ok", "action": "show_chat", 
+                    "sender": sender, "message": message, 
+                    "show_chat": True, "total_messages": len(chat_messages)})
+
+
+@flask_app.post("/api/clear_chat")
+@localhost_or_api_key
+def api_clear_chat():
+    global show_chat, chat_messages
+    with chat_lock:
+        chat_messages = []
+        show_chat = False
+    print("API: Chat messages cleared")
+    return jsonify({"status": "ok", "action": "clear_chat", "show_chat": False})
+
+
 @flask_app.get("/api/status")
 def api_status():
     with control_lock:
@@ -876,8 +1096,16 @@ def api_status():
         time_remaining = None
         if recording_start_time is not None and manual_record_command == "start":
             time_remaining = max(0, RECORDING_TIMEOUT - (time.time() - recording_start_time))
-        return jsonify({**current_status, "mode": mode,
-                        "time_remaining": time_remaining})
+        with intro_lock:
+            with organism_lock:
+                with chat_lock:
+                    return jsonify({**current_status, "mode": mode,
+                                    "time_remaining": time_remaining,
+                                    "intro_state": intro_state,
+                                    "show_organism": show_organism,
+                                    "show_chat": show_chat,
+                                    "chat_messages": chat_messages,
+                                    "chat_message_count": len(chat_messages)})
 
 
 def run_web_server():
@@ -944,6 +1172,34 @@ def make_ortho(l, r, b, t, near, far):
         0, 0, -2 / (far - near), 0,
         -(r + l) / (r - l), -(t + b) / (t - b), -(far + near) / (far - near), 1
     ], dtype=np.float32)
+
+
+def load_image_texture(image_path):
+    """Load image and create OpenGL texture."""
+    if not image_path.exists():
+        print(f"Warning: Image file not found: {image_path}")
+        return None, 0, 0
+
+    try:
+        img = Image.open(image_path).convert("RGBA")
+        img_data = np.array(img, dtype=np.uint8)
+        img_data = np.flipud(img_data)  # Flip for OpenGL
+
+        tex = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_2D, tex)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, img.width, img.height, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, img_data)
+
+        print(f"Loaded image: {image_path} ({img.width}x{img.height})")
+        return tex, img.width, img.height
+    except Exception as e:
+        print(f"Error loading image: {e}")
+        return None, 0, 0
 
 
 # ─── Main ───────────────────────────────────────────────────────────────────
@@ -1104,6 +1360,14 @@ def main():
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, cam_w, cam_h, 0,
                  GL_RGB, GL_UNSIGNED_BYTE, frame_rgb)
 
+    # ── Load logo texture ──
+    logo_path = script_dir / "logo.png"
+    logo_tex, logo_w, logo_h = load_image_texture(logo_path)
+
+    # ── Load organism texture ──
+    organism_path = script_dir / "organism.jpg"
+    organism_tex, organism_w, organism_h = load_image_texture(organism_path)
+
     # ── HUD overlay resources ──
     hud_prog = link_program(HUD_VERT_SRC, HUD_FRAG_SRC)
     hud_pos_loc = glGetAttribLocation(hud_prog, 'a_pos')
@@ -1133,6 +1397,69 @@ def main():
     blank = np.zeros((HUD_HEIGHT, HUD_WIDTH, 4), dtype=np.uint8)
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, HUD_WIDTH, HUD_HEIGHT, 0,
                  GL_RGBA, GL_UNSIGNED_BYTE, blank)
+
+    # ── Overlay quad (fullscreen for logo/instructions) ──
+    overlay_quad = np.array([
+        # x     y     u    v
+        -1.0, -1.0,  0.0, 0.0,
+         1.0, -1.0,  1.0, 0.0,
+         1.0,  1.0,  1.0, 1.0,
+        -1.0,  1.0,  0.0, 1.0,
+    ], dtype=np.float32)
+    overlay_vbo = glGenBuffers(1)
+    glBindBuffer(GL_ARRAY_BUFFER, overlay_vbo)
+    glBufferData(GL_ARRAY_BUFFER, overlay_quad.nbytes, overlay_quad, GL_STATIC_DRAW)
+
+    # Texture for instructions text overlay
+    overlay_tex = glGenTextures(1)
+    glBindTexture(GL_TEXTURE_2D, overlay_tex)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+
+    # Pre-render instructions text
+    instructions_img = render_overlay_text(ONBOARDING_TEXT, 1920, 1080)
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1920, 1080, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, instructions_img)
+
+    # ── Organism display resources (half-screen quad) ──
+    organism_quad = np.array([
+        # x     y     u    v
+        -0.5, -0.5,  0.0, 0.0,
+         0.5, -0.5,  1.0, 0.0,
+         0.5,  0.5,  1.0, 1.0,
+        -0.5,  0.5,  0.0, 1.0,
+    ], dtype=np.float32)
+    organism_vbo = glGenBuffers(1)
+    glBindBuffer(GL_ARRAY_BUFFER, organism_vbo)
+    glBufferData(GL_ARRAY_BUFFER, organism_quad.nbytes, organism_quad, GL_STATIC_DRAW)
+
+    # Texture for organism text overlay
+    organism_text_tex = glGenTextures(1)
+    glBindTexture(GL_TEXTURE_2D, organism_text_tex)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+
+    # Pre-render organism text
+    organism_text_img = render_overlay_text(ORGANISM_TEXT, 1920, 1080)
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1920, 1080, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, organism_text_img)
+
+    # Texture for chat text overlay (dynamic - updated in render loop)
+    chat_text_tex = glGenTextures(1)
+    glBindTexture(GL_TEXTURE_2D, chat_text_tex)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+    
+    # Initialize with blank texture
+    blank_chat = np.zeros((1080, 1920, 4), dtype=np.uint8)
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1920, 1080, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, blank_chat)
 
     # Zoom & HUD state
     zoom = [1.0]
@@ -1168,7 +1495,7 @@ def main():
     t0 = time.time()
 
     # ── Recording / motion state ──
-    global latest_jpeg, manual_record_command, current_status, recording_start_time
+    global latest_jpeg, manual_record_command, current_status, recording_start_time, intro_state, show_organism, show_chat, chat_messages
     OUTPUT_DIR_API.mkdir(parents=True, exist_ok=True)
     OUTPUT_DIR_AUTO.mkdir(parents=True, exist_ok=True)
 
@@ -1191,155 +1518,180 @@ def main():
     threading.Thread(target=run_web_server, daemon=True).start()
 
     print(f"Web server: http://{WEB_HOST}:{WEB_PORT}/")
-    print(f"API endpoints: /api/start, /api/stop, /api/auto, /api/status")
+    print(f"API endpoints: /api/start, /api/stop, /api/auto, /api/status, /api/begin, /api/next")
     print(f"Upload URL: {AWS_UPLOAD_URL}")
     print(f"Recording timeout: {RECORDING_TIMEOUT}s, Capture interval: {CAPTURE_INTERVAL}s")
+    print("Intro state: logo (waiting for /api/begin)")
     print("Running. Press ESC to quit. Tab to toggle fullscreen. Scroll to zoom.")
 
     # ── Render loop ──
     while not glfw.window_should_close(win):
         glfw.poll_events()
 
-        # Read webcam frame
-        ret, frame = cap.read()
-        if ret:
-            # Downscale if needed
-            if DOWNSCALE_WIDTH is not None:
-                fh, fw = frame.shape[:2]
-                if fw > DOWNSCALE_WIDTH:
-                    scale = DOWNSCALE_WIDTH / float(fw)
-                    frame = cv2.resize(frame, (int(fw * scale), int(fh * scale)),
-                                       interpolation=cv2.INTER_AREA)
+        # Get current intro state
+        with intro_lock:
+            current_intro_state = intro_state
 
-            # ── Motion detection ──
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            gray = cv2.GaussianBlur(gray, (21, 21), 0)
+        # Get current chat state
+        with chat_lock:
+            current_show_chat = show_chat
+            current_chat_messages = list(chat_messages)  # Make a copy
 
-            has_motion = False
-            if bg is None:
-                bg = gray.astype("float")
-            else:
-                cv2.accumulateWeighted(gray, bg, 0.02)
-                bg_uint8 = cv2.convertScaleAbs(bg)
-                delta = cv2.absdiff(gray, bg_uint8)
-                thresh = cv2.threshold(delta, MOTION_THRESHOLD, 255,
-                                       cv2.THRESH_BINARY)[1]
-                thresh = cv2.dilate(thresh, None, iterations=2)
-                contours, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL,
-                                               cv2.CHAIN_APPROX_SIMPLE)
-                for c in contours:
-                    if cv2.contourArea(c) >= MIN_MOTION_AREA:
-                        has_motion = True
-                        break
+        # Get current organism state
+        with organism_lock:
+            current_show_organism = show_organism
 
-            # ── Recording state machine ──
-            now = time.time()
-
-            with control_lock:
-                cmd = manual_record_command
-                rec_start = recording_start_time
-
-            api_start_just_called = (cmd == "start" and last_cmd != "start")
-            last_cmd = cmd
-
-            if api_start_just_called and recording and not api_triggered_recording:
-                print(f"Stopping motion recording for API recording. "
-                      f"Saved {img_index} images to {seq_dir}")
-                recording = False
-
-            if cmd == "start" and rec_start is not None:
-                if (now - rec_start) >= RECORDING_TIMEOUT:
-                    print(f"Recording timeout after {RECORDING_TIMEOUT}s")
-                    with control_lock:
-                        manual_record_command = "stop"
-                        recording_start_time = None
-                    cmd = "stop"
-
-            should_record = False
-            is_api_trigger = False
-
-            if cmd == "start":
-                should_record = True
-                is_api_trigger = True
-                last_motion_time = now
-            elif cmd == "stop":
-                should_record = False
-            else:
-                should_record = False
-
-            # Start new sequence
-            if should_record and not recording:
-                recording = True
-                img_index = 0
-                last_capture_time = 0.0
-                api_triggered_recording = is_api_trigger
-                output_dir = OUTPUT_DIR_API if api_triggered_recording else OUTPUT_DIR_AUTO
-                seq_dir = output_dir / timestamp_folder_name()
-                seq_dir.mkdir(parents=True, exist_ok=True)
-                trigger_type = "API" if api_triggered_recording else "MOTION"
-                print(f"Started sequence: {seq_dir} (triggered by: {trigger_type})")
-
-            # Stop sequence
-            if not should_record and recording:
-                recording = False
-                print(f"Stopped sequence. Saved {img_index} images to {seq_dir}")
-                if api_triggered_recording and seq_dir is not None:
-                    threading.Thread(target=upload_sequence,
-                                     args=(seq_dir, img_index), daemon=True).start()
-                api_triggered_recording = False
-                with control_lock:
-                    if manual_record_command == "stop":
-                        manual_record_command = None
-
-            # Capture frame to disk
-            if recording and seq_dir is not None:
-                if (now - last_capture_time) >= CAPTURE_INTERVAL:
-                    out_path = seq_dir / f"img_{img_index:05d}.webp"
-                    cv2.imwrite(str(out_path), frame,
-                                [int(cv2.IMWRITE_WEBP_QUALITY), 80])
-                    img_index += 1
-                    last_capture_time = now
-
-            # Update shared status
-            time_remaining = None
-            if rec_start is not None and cmd == "start":
-                time_remaining = max(0, RECORDING_TIMEOUT - (now - rec_start))
-            with control_lock:
-                current_status = {
-                    "recording": recording,
-                    "sequence_dir": str(seq_dir) if seq_dir else None,
-                    "images_captured": img_index,
-                    "last_motion_time": last_motion_time,
-                    "time_remaining": time_remaining,
-                    "api_triggered": api_triggered_recording,
-                }
-
-            # Update HUD state
-            hud_mode = "API" if cmd == "start" else ("STOP" if cmd == "stop" else "AUTO")
-            if recording:
-                hud_state = "REC (API)" if api_triggered_recording else "REC (MOTION)"
-            else:
-                hud_state = "IDLE"
-            hud_time_remaining = time_remaining
-            hud_has_motion = has_motion
-
-            # Encode JPEG for MJPEG stream (throttled)
-            now2 = time.time()
-            if (now2 - last_stream_time) >= stream_interval:
-                ok_j, buf = cv2.imencode(".jpg", frame,
-                                         [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
-                if ok_j:
-                    with jpeg_lock:
-                        latest_jpeg = buf.tobytes()
-                last_stream_time = now2
-
-            # Upload to GL texture
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frame_rgb = cv2.flip(frame_rgb, 0)
-            fh_gl, fw_gl = frame_rgb.shape[:2]
+        # Clear webcam texture if chat or organism is showing
+        if current_show_chat or current_show_organism:
+            # Upload black frame to clear the frozen webcam image
+            black_frame = np.zeros((cam_h, cam_w, 3), dtype=np.uint8)
+            black_frame = cv2.flip(black_frame, 0)
             glBindTexture(GL_TEXTURE_2D, tex)
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, fw_gl, fh_gl, 0,
-                         GL_RGB, GL_UNSIGNED_BYTE, frame_rgb)
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, cam_w, cam_h, 0,
+                         GL_RGB, GL_UNSIGNED_BYTE, black_frame)
+
+        # Only process webcam if in running state AND not showing chat
+        if current_intro_state == "running" and not current_show_chat:
+            # Read webcam frame
+            ret, frame = cap.read()
+            if ret:
+                # Downscale if needed
+                if DOWNSCALE_WIDTH is not None:
+                    fh, fw = frame.shape[:2]
+                    if fw > DOWNSCALE_WIDTH:
+                        scale = DOWNSCALE_WIDTH / float(fw)
+                        frame = cv2.resize(frame, (int(fw * scale), int(fh * scale)),
+                                           interpolation=cv2.INTER_AREA)
+
+                # ── Motion detection ──
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                gray = cv2.GaussianBlur(gray, (21, 21), 0)
+
+                has_motion = False
+                if bg is None:
+                    bg = gray.astype("float")
+                else:
+                    cv2.accumulateWeighted(gray, bg, 0.02)
+                    bg_uint8 = cv2.convertScaleAbs(bg)
+                    delta = cv2.absdiff(gray, bg_uint8)
+                    thresh = cv2.threshold(delta, MOTION_THRESHOLD, 255,
+                                           cv2.THRESH_BINARY)[1]
+                    thresh = cv2.dilate(thresh, None, iterations=2)
+                    contours, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL,
+                                                   cv2.CHAIN_APPROX_SIMPLE)
+                    for c in contours:
+                        if cv2.contourArea(c) >= MIN_MOTION_AREA:
+                            has_motion = True
+                            break
+
+                # ── Recording state machine ──
+                now = time.time()
+
+                with control_lock:
+                    cmd = manual_record_command
+                    rec_start = recording_start_time
+
+                api_start_just_called = (cmd == "start" and last_cmd != "start")
+                last_cmd = cmd
+
+                if api_start_just_called and recording and not api_triggered_recording:
+                    print(f"Stopping motion recording for API recording. "
+                          f"Saved {img_index} images to {seq_dir}")
+                    recording = False
+
+                if cmd == "start" and rec_start is not None:
+                    if (now - rec_start) >= RECORDING_TIMEOUT:
+                        print(f"Recording timeout after {RECORDING_TIMEOUT}s")
+                        with control_lock:
+                            manual_record_command = "stop"
+                            recording_start_time = None
+                        cmd = "stop"
+
+                should_record = False
+                is_api_trigger = False
+
+                if cmd == "start":
+                    should_record = True
+                    is_api_trigger = True
+                    last_motion_time = now
+                elif cmd == "stop":
+                    should_record = False
+                else:
+                    should_record = False
+
+                # Start new sequence
+                if should_record and not recording:
+                    recording = True
+                    img_index = 0
+                    last_capture_time = 0.0
+                    api_triggered_recording = is_api_trigger
+                    output_dir = OUTPUT_DIR_API if api_triggered_recording else OUTPUT_DIR_AUTO
+                    seq_dir = output_dir / timestamp_folder_name()
+                    seq_dir.mkdir(parents=True, exist_ok=True)
+                    trigger_type = "API" if api_triggered_recording else "MOTION"
+                    print(f"Started sequence: {seq_dir} (triggered by: {trigger_type})")
+
+                # Stop sequence
+                if not should_record and recording:
+                    recording = False
+                    print(f"Stopped sequence. Saved {img_index} images to {seq_dir}")
+                    if api_triggered_recording and seq_dir is not None:
+                        threading.Thread(target=upload_sequence,
+                                         args=(seq_dir, img_index), daemon=True).start()
+                    api_triggered_recording = False
+                    with control_lock:
+                        if manual_record_command == "stop":
+                            manual_record_command = None
+
+                # Capture frame to disk
+                if recording and seq_dir is not None:
+                    if (now - last_capture_time) >= CAPTURE_INTERVAL:
+                        out_path = seq_dir / f"img_{img_index:05d}.webp"
+                        cv2.imwrite(str(out_path), frame,
+                                    [int(cv2.IMWRITE_WEBP_QUALITY), 80])
+                        img_index += 1
+                        last_capture_time = now
+
+                # Update shared status
+                time_remaining = None
+                if rec_start is not None and cmd == "start":
+                    time_remaining = max(0, RECORDING_TIMEOUT - (now - rec_start))
+                with control_lock:
+                    current_status = {
+                        "recording": recording,
+                        "sequence_dir": str(seq_dir) if seq_dir else None,
+                        "images_captured": img_index,
+                        "last_motion_time": last_motion_time,
+                        "time_remaining": time_remaining,
+                        "api_triggered": api_triggered_recording,
+                    }
+
+                # Update HUD state
+                hud_mode = "API" if cmd == "start" else ("STOP" if cmd == "stop" else "AUTO")
+                if recording:
+                    hud_state = "REC (API)" if api_triggered_recording else "REC (MOTION)"
+                else:
+                    hud_state = "IDLE"
+                hud_time_remaining = time_remaining
+                hud_has_motion = has_motion
+
+                # Encode JPEG for MJPEG stream (throttled)
+                now2 = time.time()
+                if (now2 - last_stream_time) >= stream_interval:
+                    ok_j, buf = cv2.imencode(".jpg", frame,
+                                             [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
+                    if ok_j:
+                        with jpeg_lock:
+                            latest_jpeg = buf.tobytes()
+                    last_stream_time = now2
+
+                # Upload to GL texture
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frame_rgb = cv2.flip(frame_rgb, 0)
+                fh_gl, fw_gl = frame_rgb.shape[:2]
+                glBindTexture(GL_TEXTURE_2D, tex)
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, fw_gl, fh_gl, 0,
+                             GL_RGB, GL_UNSIGNED_BYTE, frame_rgb)
 
         # Viewport
         fb_w, fb_h = glfw.get_framebuffer_size(win)
@@ -1351,6 +1703,7 @@ def main():
         glClearColor(0.03, 0.03, 0.05, 1.0)
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
+        # ── Render shader (always, even in intro states) ──
         glUseProgram(prog)
 
         # Projection (orthographic, aspect-correct)
@@ -1420,8 +1773,132 @@ def main():
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo)
         glDrawElements(GL_TRIANGLES, num_indices, GL_UNSIGNED_INT, None)
 
-        # ── Draw HUD overlay ──
-        if show_hud[0]:
+        # ── Render intro overlays ──
+        if current_intro_state == "logo" and logo_tex is not None:
+            # Draw logo overlay
+            glEnable(GL_BLEND)
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+            glDisable(GL_DEPTH_TEST)
+
+            glUseProgram(hud_prog)
+            glActiveTexture(GL_TEXTURE0)
+            glBindTexture(GL_TEXTURE_2D, logo_tex)
+            glUniform1i(hud_tex_loc, 0)
+
+            glBindBuffer(GL_ARRAY_BUFFER, overlay_vbo)
+            glEnableVertexAttribArray(hud_pos_loc)
+            glVertexAttribPointer(hud_pos_loc, 2, GL_FLOAT, GL_FALSE, 16, ctypes.c_void_p(0))
+            glEnableVertexAttribArray(hud_uv_loc)
+            glVertexAttribPointer(hud_uv_loc, 2, GL_FLOAT, GL_FALSE, 16, ctypes.c_void_p(8))
+
+            glDrawArrays(GL_TRIANGLE_FAN, 0, 4)
+
+            glDisableVertexAttribArray(hud_pos_loc)
+            glDisableVertexAttribArray(hud_uv_loc)
+
+            glEnable(GL_DEPTH_TEST)
+            glDisable(GL_BLEND)
+
+        elif current_intro_state == "instructions":
+            # Draw instructions overlay
+            glEnable(GL_BLEND)
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+            glDisable(GL_DEPTH_TEST)
+
+            glUseProgram(hud_prog)
+            glActiveTexture(GL_TEXTURE0)
+            glBindTexture(GL_TEXTURE_2D, overlay_tex)
+            glUniform1i(hud_tex_loc, 0)
+
+            glBindBuffer(GL_ARRAY_BUFFER, overlay_vbo)
+            glEnableVertexAttribArray(hud_pos_loc)
+            glVertexAttribPointer(hud_pos_loc, 2, GL_FLOAT, GL_FALSE, 16, ctypes.c_void_p(0))
+            glEnableVertexAttribArray(hud_uv_loc)
+            glVertexAttribPointer(hud_uv_loc, 2, GL_FLOAT, GL_FALSE, 16, ctypes.c_void_p(8))
+
+            glDrawArrays(GL_TRIANGLE_FAN, 0, 4)
+
+            glDisableVertexAttribArray(hud_pos_loc)
+            glDisableVertexAttribArray(hud_uv_loc)
+
+            glEnable(GL_DEPTH_TEST)
+            glDisable(GL_BLEND)
+
+        # ── Draw organism display (when stop is called) ──
+        if current_show_organism and organism_tex is not None:
+            # Draw organism image (half-screen)
+            glEnable(GL_BLEND)
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+            glDisable(GL_DEPTH_TEST)
+
+            glUseProgram(hud_prog)
+            glActiveTexture(GL_TEXTURE0)
+            glBindTexture(GL_TEXTURE_2D, organism_tex)
+            glUniform1i(hud_tex_loc, 0)
+
+            glBindBuffer(GL_ARRAY_BUFFER, organism_vbo)
+            glEnableVertexAttribArray(hud_pos_loc)
+            glVertexAttribPointer(hud_pos_loc, 2, GL_FLOAT, GL_FALSE, 16, ctypes.c_void_p(0))
+            glEnableVertexAttribArray(hud_uv_loc)
+            glVertexAttribPointer(hud_uv_loc, 2, GL_FLOAT, GL_FALSE, 16, ctypes.c_void_p(8))
+
+            glDrawArrays(GL_TRIANGLE_FAN, 0, 4)
+
+            glDisableVertexAttribArray(hud_pos_loc)
+            glDisableVertexAttribArray(hud_uv_loc)
+
+            # Draw organism text overlay (fullscreen, semi-transparent)
+            glBindTexture(GL_TEXTURE_2D, organism_text_tex)
+            glUniform1i(hud_tex_loc, 0)
+
+            glBindBuffer(GL_ARRAY_BUFFER, overlay_vbo)
+            glEnableVertexAttribArray(hud_pos_loc)
+            glVertexAttribPointer(hud_pos_loc, 2, GL_FLOAT, GL_FALSE, 16, ctypes.c_void_p(0))
+            glEnableVertexAttribArray(hud_uv_loc)
+            glVertexAttribPointer(hud_uv_loc, 2, GL_FLOAT, GL_FALSE, 16, ctypes.c_void_p(8))
+
+            glDrawArrays(GL_TRIANGLE_FAN, 0, 4)
+
+            glDisableVertexAttribArray(hud_pos_loc)
+            glDisableVertexAttribArray(hud_uv_loc)
+
+            glEnable(GL_DEPTH_TEST)
+            glDisable(GL_BLEND)
+
+        # ── Draw chat display (when /api/chat is called) ──
+        if current_show_chat and current_chat_messages:
+            # Update chat text texture with current messages
+            chat_img = render_chat_messages(current_chat_messages, 1920, 1080)
+            glBindTexture(GL_TEXTURE_2D, chat_text_tex)
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1920, 1080, 0,
+                         GL_RGBA, GL_UNSIGNED_BYTE, chat_img)
+
+            # Draw chat text overlay (fullscreen, semi-transparent)
+            glEnable(GL_BLEND)
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+            glDisable(GL_DEPTH_TEST)
+
+            glUseProgram(hud_prog)
+            glActiveTexture(GL_TEXTURE0)
+            glBindTexture(GL_TEXTURE_2D, chat_text_tex)
+            glUniform1i(hud_tex_loc, 0)
+
+            glBindBuffer(GL_ARRAY_BUFFER, overlay_vbo)
+            glEnableVertexAttribArray(hud_pos_loc)
+            glVertexAttribPointer(hud_pos_loc, 2, GL_FLOAT, GL_FALSE, 16, ctypes.c_void_p(0))
+            glEnableVertexAttribArray(hud_uv_loc)
+            glVertexAttribPointer(hud_uv_loc, 2, GL_FLOAT, GL_FALSE, 16, ctypes.c_void_p(8))
+
+            glDrawArrays(GL_TRIANGLE_FAN, 0, 4)
+
+            glDisableVertexAttribArray(hud_pos_loc)
+            glDisableVertexAttribArray(hud_uv_loc)
+
+            glEnable(GL_DEPTH_TEST)
+            glDisable(GL_BLEND)
+
+        # ── Draw HUD overlay (only in running state) ──
+        if current_intro_state == "running" and show_hud[0]:
             hud_img = render_hud_text(hud_mode, hud_state, img_index,
                                       hud_time_remaining, hud_has_motion)
             glBindTexture(GL_TEXTURE_2D, hud_tex)
