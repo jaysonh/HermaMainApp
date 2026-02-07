@@ -565,9 +565,25 @@ void main() {
 
     // ── Webcam texture replaces rect1 interior ──
     vec2 webcamUV = (v_uv - (u_rect1Pos - u_rect1Size)) / (u_rect1Size * 2.0);
+
+    // Shrink webcam image but keep it centered
+    float webcamScale = 0.9;
+    webcamUV = (webcamUV - 0.5) / webcamScale + 0.5;
+
     vec3 webcamSample = texture2D(u_webcamTex, clamp(webcamUV, 0.0, 1.0)).rgb;
-    float inRect = step(0.0, webcamUV.x) * step(webcamUV.x, 1.0)
-                 * step(0.0, webcamUV.y) * step(webcamUV.y, 1.0);
+
+    //float inRect = step(0.0, webcamUV.x) * step(webcamUV.x, 1.0)
+    //             * step(0.0, webcamUV.y) * step(webcamUV.y, 1.0);
+
+    // ---- Feathered mask ----
+    // Distance to nearest edge in UV space (0 at edge, 0.5 at center)
+    float edgeDist = min(min(webcamUV.x, 1.0 - webcamUV.x),
+                         min(webcamUV.y, 1.0 - webcamUV.y));
+
+    // Feather width in UV units (tweak this)
+    float feather = 0.04;
+    float inRect = smoothstep(0.0, feather, edgeDist);
+
     rect1Color = mix(rect1Color, webcamSample, inRect);
 
     // Rectangle 3 colors
@@ -752,7 +768,7 @@ HUD_HEIGHT = 36
 
 def render_hud_text(mode_str, rec_state, img_index, time_remaining, has_motion):
     img = np.zeros((HUD_HEIGHT, HUD_WIDTH, 4), dtype=np.uint8)
-    img[:, :, 3] = 160  # semi-transparent dark background
+    img[:, :, 3] = 0  # background transparency
 
     parts = [mode_str, rec_state]
     if rec_state != "IDLE":
@@ -772,7 +788,7 @@ def render_hud_text(mode_str, rec_state, img_index, time_remaining, has_motion):
 def render_overlay_text(text, width, height):
     """Render multi-line text centered on a semi-transparent background."""
     img = np.zeros((height, width, 4), dtype=np.uint8)
-    img[:, :, 3] = 200  # semi-transparent background
+    img[:, :, 3] = 0  # background transparency
 
     lines = text.strip().split('\n')
     font = cv2.FONT_HERSHEY_SIMPLEX
@@ -798,7 +814,7 @@ def render_overlay_text(text, width, height):
 def render_chat_messages(messages, width, height):
     """Render chat messages in bubble style - organism on left, user on right."""
     img = np.zeros((height, width, 4), dtype=np.uint8)
-    img[:, :, 3] = 180  # semi-transparent background
+    img[:, :, 3] = 0  # background transparency
     
     if not messages:
         return img
@@ -1724,6 +1740,19 @@ def main():
         glUniform1f(u['u_ringCount'], P['ringCount'])
         glUniform3f(u['u_lightDir'], 0.3, 0.3, 0.9)
         glUniform1f(u['u_aspectRatio'], TARGET_ASPECT)
+
+        # Decide whether webcam should be visible in the shader
+        webcam_visible = (current_intro_state == "running"
+                          and not current_show_chat
+                          and not current_show_organism)
+
+        # Drive rect1 elevation/blend based on webcam visibility
+        if webcam_visible:
+            P['rect1Elev'] = 0.3
+            P['rect1Blend'] = 0.25
+        else:
+            P['rect1Elev'] = 0.0
+            P['rect1Blend'] = 0.0
 
         glUniform2f(u['u_rect1Pos'], P['rect1X'], P['rect1Y'])
         glUniform2f(u['u_rect1Size'], P['rect1W'], P['rect1H'])
