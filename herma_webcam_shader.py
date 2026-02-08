@@ -18,8 +18,10 @@ import sys
 import time
 import threading
 import ctypes
+import json
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 import os
 import argparse
 
@@ -28,7 +30,7 @@ import cv2
 import requests
 from flask import Flask, Response, jsonify, request as flask_request
 from flask_cors import CORS
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 try:
     import tomllib  # Python 3.11+
@@ -48,21 +50,22 @@ except ImportError as e:
 CAM_INDEX = 1
 WINDOW_W = 1280
 WINDOW_H = 720
-GRID_RES = 200
+GRID_RES = 400
 TARGET_ASPECT = 16.0 / 9.0
 
 # Default shader parameters (from herma-record.html)
+# rect3 is the top green square, rect4 is the bottom purple square
 P = dict(
     heightScale=0.3, dripSpeed=0.4, distortion=0.5, ringCount=8.0,
     terrainHue=-0.35, terrainSat=1.0, terrainBright=1.0, terrainContrast=1.0,
     rect1X=0.5, rect1Y=0.42, rect1W=0.21, rect1H=0.2,
     rect1Elev=0.3, rect1Blend=0.25,
     rect1Hue=0.0, rect1Sat=1.0, rect1Bright=1.0, rect1Contrast=1.0,
-    rect3X=0.5, rect3Y=0.86, rect3W=0.22, rect3H=0.06,
-    rect3Elev=0.4, rect3Blend=0.15,
+    rect3X=0.0, rect3Y=0.86, rect3W=0.22, rect3H=0.06,
+    rect3Elev=0.0, rect3Blend=0.0,
     rect3Hue=0.2, rect3Sat=1.0, rect3Bright=1.1, rect3Contrast=1.0,
-    rect4X=0.36, rect4Y=0.14, rect4W=0.11, rect4H=0.05,
-    rect4Elev=0.3, rect4Blend=0.15,
+    rect4X=0.06, rect4Y=0.14, rect4W=0.11, rect4H=0.05,
+    rect4Elev=0.0, rect4Blend=0.00,
     rect4Hue=0.2, rect4Sat=1.3, rect4Bright=1.0, rect4Contrast=1.0,
 )
 
@@ -75,7 +78,7 @@ CAPTURE_INTERVAL = 0.5
 RECORDING_TIMEOUT = 30.0
 STILL_SECONDS_TO_STOP = 5.0
 
-DOWNSCALE_WIDTH = 960
+DOWNSCALE_WIDTH = 1920
 OUTPUT_DIR_API = Path("recorded")
 OUTPUT_DIR_AUTO = Path("tmp")
 
@@ -88,12 +91,20 @@ API_KEY = os.environ.get("MONITOR_API_KEY", "jayson")
 AWS_UPLOAD_URL = os.environ.get("AWS_UPLOAD_URL", "http://10.142.77.6:5009/api/upload")
 AWS_UPLOAD_KEY = os.environ.get("AWS_UPLOAD_KEY", "jayson")
 
+# ─── Font Loading ────────────────────────────────────────────────────────────
+_FONT_PATH = str(Path(__file__).resolve().parent / "assets" / "sylfaen.ttf")
+
+def _load_font(size):
+    try:
+        return ImageFont.truetype(_FONT_PATH, size)
+    except (IOError, OSError):
+        print(f"Warning: Could not load {_FONT_PATH}, falling back to default font")
+        return ImageFont.load_default()
+
 ONBOARDING_TEXT = """Welcome to Hermaphrogenesis
 blah blah blah blah"""
 
-ORGANISM_TEXT = """Thank you for your participation
-
-Processing your data..."""
+ORGANISM_TEXT = ""
 
 # ─── Flask App & Shared State ───────────────────────────────────────────────
 
@@ -121,6 +132,9 @@ intro_lock = threading.Lock()
 # Organism display state
 show_organism = False
 organism_lock = threading.Lock()
+organism_overlay_text = ORGANISM_TEXT  # Dynamic text shown on organism screen
+organism_overlay_image = None  # PIL Image for generated organism (400x400)
+organism_text_dirty = False  # Flag to signal render loop to re-upload texture
 
 # Chat display state
 show_chat = False
@@ -149,6 +163,7 @@ def reset_to_initial_state():
     """Reset all shared state back to initial startup defaults."""
     global manual_record_command, recording_start_time, current_status
     global intro_state, show_organism, show_chat, chat_messages, latest_jpeg
+    global organism_overlay_text, organism_overlay_image, organism_text_dirty
 
     # Stop recording mode + timers
     with control_lock:
@@ -169,6 +184,9 @@ def reset_to_initial_state():
     # Hide overlays
     with organism_lock:
         show_organism = False
+        organism_overlay_text = ORGANISM_TEXT
+        organism_overlay_image = None
+        organism_text_dirty = True
 
     with chat_lock:
         show_chat = False
@@ -813,8 +831,9 @@ HUD_HEIGHT = 36
 
 
 def render_hud_text(mode_str, rec_state, img_index, time_remaining, has_motion):
-    img = np.zeros((HUD_HEIGHT, HUD_WIDTH, 4), dtype=np.uint8)
-    img[:, :, 3] = 0  # background transparency
+    pil_img = Image.new("RGBA", (HUD_WIDTH, HUD_HEIGHT), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(pil_img)
+    font = _load_font(20)
 
     parts = [mode_str, rec_state]
     if rec_state != "IDLE":
@@ -825,54 +844,210 @@ def render_hud_text(mode_str, rec_state, img_index, time_remaining, has_motion):
         parts.append("MOTION")
     text = "  |  ".join(parts)
 
-    cv2.putText(img, text, (12, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                (255, 255, 255, 255), 1, cv2.LINE_AA)
+    draw.text((12, 6), text, font=font, fill=(255, 255, 255, 255))
+    img = np.array(pil_img, dtype=np.uint8)
     img = cv2.flip(img, 0)  # flip vertically for GL texture origin
     return img
 
 
 def render_overlay_text(text, width, height):
-    """Render multi-line text centered on a semi-transparent background."""
-    img = np.zeros((height, width, 4), dtype=np.uint8)
-    img[:, :, 3] = 0  # background transparency
+    """Render multi-line text centered on a semi-transparent background with word wrapping."""
+    pil_img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(pil_img)
+    font = _load_font(32)
 
-    lines = text.strip().split('\n')
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 1.0
-    thickness = 2
+    margin = 80
+    max_text_width = width - margin * 2
     line_height = 50
 
+    # Word-wrap each paragraph
+    wrapped_lines = []
+    for paragraph in text.strip().split('\n'):
+        if not paragraph.strip():
+            wrapped_lines.append("")
+            continue
+        words = paragraph.split()
+        current_line = ""
+        for word in words:
+            test_line = current_line + " " + word if current_line else word
+            bbox = draw.textbbox((0, 0), test_line, font=font)
+            if bbox[2] - bbox[0] <= max_text_width:
+                current_line = test_line
+            else:
+                if current_line:
+                    wrapped_lines.append(current_line)
+                current_line = word
+        if current_line:
+            wrapped_lines.append(current_line)
+
     # Calculate total text block height
-    total_height = len(lines) * line_height
-    y_start = (height - total_height) // 2 + line_height
+    total_height = len(wrapped_lines) * line_height
+    y_start = (height - total_height) // 2
 
-    for i, line in enumerate(lines):
-        text_size = cv2.getTextSize(line, font, font_scale, thickness)[0]
-        x = (width - text_size[0]) // 2
+    for i, line in enumerate(wrapped_lines):
+        bbox = draw.textbbox((0, 0), line, font=font)
+        text_w = bbox[2] - bbox[0]
+        x = (width - text_w) // 2
         y = y_start + i * line_height
-        cv2.putText(img, line, (x, y), font, font_scale,
-                    (255, 255, 255, 255), thickness, cv2.LINE_AA)
+        draw.text((x, y), line, font=font, fill=(255, 255, 255, 255))
 
+    img = np.array(pil_img, dtype=np.uint8)
+    img = cv2.flip(img, 0)  # flip vertically for GL texture origin
+    return img
+
+
+def _animated_dots():
+    """Return 1-3 dots cycling based on current time."""
+    return "." * (int(time.time() * 2) % 3 + 1)
+
+
+def render_organism_overlay(text, width, height, organism_img=None):
+    """Render organism name + description with a grey translucent panel sized to fit the text,
+    leaving space for a 400x400 image on the right. If organism_img (PIL Image) is provided,
+    it is drawn in that space."""
+    pil_img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(pil_img)
+
+    title_font = _load_font(44)
+    body_font = _load_font(26)
+
+    # Animate dots on any "Loading" text
+    dots = _animated_dots()
+    text = text.replace("Loading organism", f"Loading organism{dots}")
+    text = text.replace("Loading image", f"Loading image{dots}")
+
+    # Layout constants
+    img_size = 400
+    panel_padding = 30
+    line_height = 38
+    title_line_height = 56
+    title_bottom_gap = 20
+
+    # Max text area width (screen minus padding, image space, gaps)
+    max_text_area_w = width - panel_padding * 3 - img_size
+
+    # Split title from description
+    parts = text.strip().split('\n', 1)
+    title = parts[0].strip() if parts else ""
+    description = parts[1].strip() if len(parts) > 1 else ""
+
+    # --- First pass: compute wrapped lines and total content height ---
+    title_lines = []
+    if title:
+        words = title.split()
+        current_line = ""
+        for word in words:
+            test_line = current_line + " " + word if current_line else word
+            bbox = draw.textbbox((0, 0), test_line, font=title_font)
+            if bbox[2] - bbox[0] <= max_text_area_w:
+                current_line = test_line
+            else:
+                if current_line:
+                    title_lines.append(current_line)
+                current_line = word
+        if current_line:
+            title_lines.append(current_line)
+
+    body_lines = []
+    if description:
+        for paragraph in description.split('\n'):
+            if not paragraph.strip():
+                body_lines.append("")
+                continue
+            words = paragraph.split()
+            current_line = ""
+            for word in words:
+                test_line = current_line + " " + word if current_line else word
+                bbox = draw.textbbox((0, 0), test_line, font=body_font)
+                if bbox[2] - bbox[0] <= max_text_area_w:
+                    current_line = test_line
+                else:
+                    if current_line:
+                        body_lines.append(current_line)
+                    current_line = word
+            if current_line:
+                body_lines.append(current_line)
+
+    # Calculate content height
+    content_h = 0
+    if title_lines:
+        content_h += len(title_lines) * title_line_height + title_bottom_gap
+    content_h += len(body_lines) * line_height
+
+    # Panel dimensions sized to fit content
+    panel_h = content_h + panel_padding * 2
+    panel_w = max_text_area_w + img_size + panel_padding * 3
+    # Ensure panel is tall enough for the image
+    panel_h = max(panel_h, img_size + panel_padding * 2)
+
+    # Centre the panel on screen
+    panel_x = (width - panel_w) // 2
+    panel_y = (height - panel_h) // 2
+
+    # Draw semi-transparent grey background
+    draw.rectangle(
+        [(panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h)],
+        fill=(30, 30, 30, 200))
+
+    # --- Second pass: draw text ---
+    text_x = panel_x + panel_padding
+    text_y = panel_y + panel_padding
+
+    for tl in title_lines:
+        draw.text((text_x, text_y), tl, font=title_font, fill=(255, 255, 255, 255))
+        text_y += title_line_height
+    if title_lines:
+        text_y += title_bottom_gap
+
+    for bl in body_lines:
+        if bl:
+            draw.text((text_x, text_y), bl, font=body_font, fill=(220, 220, 220, 255))
+        text_y += line_height
+
+    # Draw organism image or pulsing placeholder (right side, vertically centred in panel)
+    img_x = panel_x + panel_w - panel_padding - img_size
+    img_y = panel_y + (panel_h - img_size) // 2
+    if organism_img is not None:
+        pil_img.paste(organism_img, (img_x, img_y))
+    elif text.strip():
+        # Pulsing placeholder while image is loading
+        import math
+        pulse = (math.sin(time.time() * 3.0) + 1.0) / 2.0  # 0.0 to 1.0
+        alpha = int(40 + pulse * 80)  # pulse between 40 and 120
+        draw.rectangle(
+            [(img_x, img_y), (img_x + img_size, img_y + img_size)],
+            fill=(80, 80, 80, alpha))
+        # "Loading image..." text centred in the placeholder
+        loading_font = _load_font(20)
+        loading_text = f"Loading image{dots}"
+        lt_bbox = draw.textbbox((0, 0), loading_text, font=loading_font)
+        lt_w = lt_bbox[2] - lt_bbox[0]
+        lt_h = lt_bbox[3] - lt_bbox[1]
+        lt_alpha = int(120 + pulse * 135)  # pulse between 120 and 255
+        draw.text(
+            (img_x + (img_size - lt_w) // 2, img_y + (img_size - lt_h) // 2),
+            loading_text, font=loading_font, fill=(180, 180, 180, lt_alpha))
+
+    img = np.array(pil_img, dtype=np.uint8)
     img = cv2.flip(img, 0)  # flip vertically for GL texture origin
     return img
 
 
 def render_chat_messages(messages, width, height):
     """Render chat messages in bubble style - organism on left, user on right."""
-    img = np.zeros((height, width, 4), dtype=np.uint8)
-    img[:, :, 3] = 0  # background transparency
-    
+    pil_img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(pil_img)
+    font = _load_font(22)
+
     if not messages:
-        return img
-    
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 0.7
-    thickness = 2
+        return np.array(pil_img, dtype=np.uint8)
+
     padding = 20
     bubble_padding = 15
     message_spacing = 15
+    line_height = 35
     max_bubble_width = int(width * 0.4)  # 40% of screen width per message
-    
+
     margin = 50
 
     # First pass: compute bubble layout for every message (oldest to newest)
@@ -888,8 +1063,9 @@ def render_chat_messages(messages, width, height):
 
         for word in words:
             test_line = current_line + " " + word if current_line else word
-            text_size = cv2.getTextSize(test_line, font, font_scale, thickness)[0]
-            if text_size[0] <= max_bubble_width - (bubble_padding * 2):
+            bbox = draw.textbbox((0, 0), test_line, font=font)
+            text_w = bbox[2] - bbox[0]
+            if text_w <= max_bubble_width - (bubble_padding * 2):
                 current_line = test_line
             else:
                 if current_line:
@@ -899,9 +1075,9 @@ def render_chat_messages(messages, width, height):
             lines.append(current_line)
 
         # Calculate bubble dimensions
-        max_line_width = max([cv2.getTextSize(line, font, font_scale, thickness)[0][0] for line in lines])
+        max_line_width = max([draw.textbbox((0, 0), line, font=font)[2] - draw.textbbox((0, 0), line, font=font)[0] for line in lines])
         bubble_width = max_line_width + (bubble_padding * 2)
-        bubble_height = len(lines) * 35 + (bubble_padding * 2)
+        bubble_height = len(lines) * line_height + (bubble_padding * 2)
 
         bubble_data.append({
             'sender': sender,
@@ -911,7 +1087,7 @@ def render_chat_messages(messages, width, height):
         })
 
     # Total height of all messages + typing indicator
-    dots_indicator_height = 35 + (bubble_padding * 2)
+    dots_indicator_height = line_height + (bubble_padding * 2)
     total_height = (sum(b['bubble_height'] for b in bubble_data)
                     + message_spacing * len(bubble_data)
                     + dots_indicator_height)
@@ -950,18 +1126,16 @@ def render_chat_messages(messages, width, height):
         bubble_y = y_position
 
         # Draw bubble background
-        cv2.rectangle(img,
-                     (bubble_x, bubble_y),
-                     (bubble_x + bw, bubble_y + bh),
-                     bubble_color, -1)
+        draw.rectangle(
+            [(bubble_x, bubble_y), (bubble_x + bw, bubble_y + bh)],
+            fill=bubble_color)
 
         # Draw text lines
-        text_y = bubble_y + bubble_padding + 25
+        text_y = bubble_y + bubble_padding
         for line in lines:
-            cv2.putText(img, line,
-                       (bubble_x + bubble_padding, text_y),
-                       font, font_scale, text_color, thickness, cv2.LINE_AA)
-            text_y += 35
+            draw.text((bubble_x + bubble_padding, text_y), line,
+                      font=font, fill=text_color)
+            text_y += line_height
 
         # Move down for next message
         y_position = bubble_y + bh + message_spacing
@@ -972,9 +1146,10 @@ def render_chat_messages(messages, width, height):
     dot_count = int(time.time() * 2) % 3 + 1  # cycles 1,2,3
     dots_text = "." * dot_count
 
-    min_dots_width = cv2.getTextSize("...", font, font_scale, thickness)[0][0]
+    dots_bbox = draw.textbbox((0, 0), "...", font=font)
+    min_dots_width = dots_bbox[2] - dots_bbox[0]
     dots_bw = min_dots_width + (bubble_padding * 2)
-    dots_bh = 35 + (bubble_padding * 2)
+    dots_bh = line_height + (bubble_padding * 2)
 
     if dots_sender == "organism":
         dots_x = padding
@@ -986,14 +1161,13 @@ def render_chat_messages(messages, width, height):
         dots_bubble_color = (40, 60, 100, 220)
 
     if y_position + dots_bh >= 0:
-        cv2.rectangle(img,
-                     (dots_x, y_position),
-                     (dots_x + dots_bw, y_position + dots_bh),
-                     dots_bubble_color, -1)
-        cv2.putText(img, dots_text,
-                   (dots_x + bubble_padding, y_position + bubble_padding + 25),
-                   font, font_scale, dots_text_color, thickness, cv2.LINE_AA)
+        draw.rectangle(
+            [(dots_x, y_position), (dots_x + dots_bw, y_position + dots_bh)],
+            fill=dots_bubble_color)
+        draw.text((dots_x + bubble_padding, y_position + bubble_padding),
+                  dots_text, font=font, fill=dots_text_color)
 
+    img = np.array(pil_img, dtype=np.uint8)
     img = cv2.flip(img, 0)  # flip vertically for GL texture origin
     return img
 
@@ -1016,6 +1190,16 @@ def localhost_or_api_key(f):
 
 def timestamp_folder_name():
     return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+
+def _set_organism_text(text, image=None):
+    """Update the organism overlay text (and optionally image) from any thread."""
+    global organism_overlay_text, organism_overlay_image, organism_text_dirty
+    with organism_lock:
+        organism_overlay_text = text
+        if image is not None:
+            organism_overlay_image = image
+        organism_text_dirty = True
 
 
 def upload_sequence(seq_dir: Path, image_count: int):
@@ -1048,6 +1232,8 @@ def upload_sequence(seq_dir: Path, image_count: int):
         )
         if response.ok:
             print(f"Upload successful: {response.json()}")
+            _set_organism_text("Loading organism")
+            analyse_video(seq_dir.name)
             return True
         else:
             print(f"Upload failed: {response.status_code} - {response.text}")
@@ -1058,6 +1244,76 @@ def upload_sequence(seq_dir: Path, image_count: int):
     finally:
         for fh in file_handles:
             fh.close()
+
+
+def _download_organism_image(image_url):
+    """Download an image from a URL and return it as a PIL Image sized to 400x400."""
+    try:
+        print(f"Downloading organism image from {image_url[:80]}...")
+        resp = requests.get(image_url, timeout=60)
+        if not resp.ok:
+            print(f"Image download failed: {resp.status_code}")
+            return None
+        from io import BytesIO
+        img = Image.open(BytesIO(resp.content)).convert("RGBA")
+        img = img.resize((400, 400), Image.LANCZOS)
+        print("Organism image downloaded and resized to 400x400")
+        return img
+    except Exception as e:
+        print(f"Image download error: {e}")
+        return None
+
+
+def analyse_video(folder_name: str):
+    """Call the video analysis endpoint (SSE), wait for agent2b/2c, and display results."""
+    parsed = urlparse(AWS_UPLOAD_URL)
+    url = f"http://{parsed.hostname}:5002/api/analyse-video-agents"
+    print(f"Starting video analysis for folder: {folder_name}")
+    current_overlay_text = None  # track the text so we can re-use it when image arrives
+    try:
+        response = requests.post(
+           url,
+           json={"folder": folder_name},
+           params={"agent3": "false"},
+           stream=True,
+           timeout=300,
+        )
+        if not response.ok:
+            print(f"Analysis request failed: {response.status_code} - {response.text}")
+            return
+        for line in response.iter_lines():
+            if line:
+                line = line.decode('utf-8')
+                if line.startswith('data: '):
+                    data = json.loads(line[6:])
+                    print(f"Analysis: {data}")
+
+                    # When agent2b completes, show the visual description
+                    if (data.get('stage') == 'agent2b'
+                            and data.get('status') == 'complete'
+                            and data.get('data')):
+                        desc = data['data'].get('visual_description', '')
+                        name = data['data'].get('organism_name', '')
+                        if desc:
+                            current_overlay_text = f"{name}\n\n{desc}" if name else desc
+                            _set_organism_text(current_overlay_text)
+                            print(f"Organism visual description set: {name}")
+
+                    # When agent2c completes, download and display the organism image
+                    if (data.get('stage') == 'agent2c'
+                            and data.get('status') == 'complete'
+                            and data.get('data')):
+                        image_url = data['data'].get('image_url', '')
+                        if image_url:
+                            pil_img = _download_organism_image(image_url)
+                            if pil_img and current_overlay_text:
+                                _set_organism_text(current_overlay_text, image=pil_img)
+                                print("Organism image displayed")
+
+                    if data.get('done') or data.get('error'):
+                        break
+    except requests.exceptions.RequestException as e:
+        print(f"Analysis error: {e}")
 
 
 def mjpeg_generator():
@@ -1487,12 +1743,29 @@ def main():
                  GL_RGB, GL_UNSIGNED_BYTE, frame_rgb)
 
     # ── Load logo texture ──
-    logo_path = script_dir / "logo.png"
+    logo_path = script_dir / "assets/LogoV2.png"
     logo_tex, logo_w, logo_h = load_image_texture(logo_path)
 
-    # ── Load organism texture ──
-    organism_path = script_dir / "organism.jpg"
-    organism_tex, organism_w, organism_h = load_image_texture(organism_path)
+    # ── Logo quad (full width, aspect-ratio-preserving height) ──
+    logo_vbo = None
+    if logo_tex is not None and logo_w > 0 and logo_h > 0:
+        init_fb_w, init_fb_h = glfw.get_framebuffer_size(win)
+        logo_aspect = logo_w / logo_h
+        screen_aspect = init_fb_w / init_fb_h
+        # Full width in NDC is 2.0; compute height that preserves logo aspect ratio
+        ndc_h = (screen_aspect / logo_aspect) * 2.0
+        ndc_h = min(ndc_h, 2.0)  # clamp so it doesn't exceed screen
+        half_h = ndc_h / 2.0
+        logo_quad = np.array([
+            # x     y           u    v
+            -1.0, -half_h,     0.0, 0.0,
+             1.0, -half_h,     1.0, 0.0,
+             1.0,  half_h,     1.0, 1.0,
+            -1.0,  half_h,     0.0, 1.0,
+        ], dtype=np.float32)
+        logo_vbo = glGenBuffers(1)
+        glBindBuffer(GL_ARRAY_BUFFER, logo_vbo)
+        glBufferData(GL_ARRAY_BUFFER, logo_quad.nbytes, logo_quad, GL_STATIC_DRAW)
 
     # ── HUD overlay resources ──
     hud_prog = link_program(HUD_VERT_SRC, HUD_FRAG_SRC)
@@ -1549,18 +1822,6 @@ def main():
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1920, 1080, 0,
                  GL_RGBA, GL_UNSIGNED_BYTE, instructions_img)
 
-    # ── Organism display resources (half-screen quad) ──
-    organism_quad = np.array([
-        # x     y     u    v
-        -0.5, -0.5,  0.0, 0.0,
-         0.5, -0.5,  1.0, 0.0,
-         0.5,  0.5,  1.0, 1.0,
-        -0.5,  0.5,  0.0, 1.0,
-    ], dtype=np.float32)
-    organism_vbo = glGenBuffers(1)
-    glBindBuffer(GL_ARRAY_BUFFER, organism_vbo)
-    glBufferData(GL_ARRAY_BUFFER, organism_quad.nbytes, organism_quad, GL_STATIC_DRAW)
-
     # Texture for organism text overlay
     organism_text_tex = glGenTextures(1)
     glBindTexture(GL_TEXTURE_2D, organism_text_tex)
@@ -1570,7 +1831,7 @@ def main():
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
 
     # Pre-render organism text
-    organism_text_img = render_overlay_text(ORGANISM_TEXT, 1920, 1080)
+    organism_text_img = render_organism_overlay(ORGANISM_TEXT, 1920, 1080)
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1920, 1080, 0,
                  GL_RGBA, GL_UNSIGNED_BYTE, organism_text_img)
 
@@ -1589,7 +1850,7 @@ def main():
 
     # Zoom & HUD state
     zoom = [1.0]
-    show_hud = [True]
+    show_hud = [False]
 
     def on_scroll(_win, _xoff, yoff):
         zoom[0] = max(0.5, min(3.0, zoom[0] + yoff * 0.1))
@@ -1622,6 +1883,7 @@ def main():
 
     # ── Recording / motion state ──
     global latest_jpeg, manual_record_command, current_status, recording_start_time, intro_state, show_organism, show_chat, chat_messages
+    global organism_text_dirty, organism_overlay_text, organism_overlay_image
     OUTPUT_DIR_API.mkdir(parents=True, exist_ok=True)
     OUTPUT_DIR_AUTO.mkdir(parents=True, exist_ok=True)
 
@@ -1666,6 +1928,10 @@ def main():
         # Get current organism state
         with organism_lock:
             current_show_organism = show_organism
+            current_organism_text_dirty = organism_text_dirty
+            current_organism_text = organism_overlay_text
+            current_organism_image = organism_overlay_image
+            organism_text_dirty = False
         
         if consume_restart_request():
             print("Restarting to initial state...")
@@ -1695,6 +1961,17 @@ def main():
                          GL_RGB, GL_UNSIGNED_BYTE, black_frame)
     
             continue
+
+        # Re-render organism text texture when it changes
+        # Re-render organism overlay when dirty, or every frame while pulsing placeholder
+        organism_needs_render = current_organism_text_dirty or (
+            current_show_organism and current_organism_text.strip()
+            and current_organism_image is None)
+        if organism_needs_render:
+            organism_text_img = render_organism_overlay(current_organism_text, 1920, 1080, organism_img=current_organism_image)
+            glBindTexture(GL_TEXTURE_2D, organism_text_tex)
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1920, 1080, 0,
+                         GL_RGBA, GL_UNSIGNED_BYTE, organism_text_img)
 
         # Clear webcam texture if chat or organism is showing
         if current_show_chat or current_show_organism:
@@ -1840,6 +2117,11 @@ def main():
                             latest_jpeg = buf.tobytes()
                     last_stream_time = now2
 
+                # Draw recording indicator
+                if recording:
+                    fh_rec, fw_rec = frame.shape[:2]
+                    cv2.circle(frame, (fw_rec - 50, 50), 12, (0, 0, 255), -1)
+
                 # Upload to GL texture
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 frame_rgb = cv2.flip(frame_rgb, 0)
@@ -1942,8 +2224,8 @@ def main():
         glDrawElements(GL_TRIANGLES, num_indices, GL_UNSIGNED_INT, None)
 
         # ── Render intro overlays ──
-        if current_intro_state == "logo" and logo_tex is not None:
-            # Draw logo overlay
+        if current_intro_state == "logo" and logo_tex is not None and logo_vbo is not None:
+            # Draw logo overlay (aspect-ratio-preserving)
             glEnable(GL_BLEND)
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
             glDisable(GL_DEPTH_TEST)
@@ -1953,7 +2235,7 @@ def main():
             glBindTexture(GL_TEXTURE_2D, logo_tex)
             glUniform1i(hud_tex_loc, 0)
 
-            glBindBuffer(GL_ARRAY_BUFFER, overlay_vbo)
+            glBindBuffer(GL_ARRAY_BUFFER, logo_vbo)
             glEnableVertexAttribArray(hud_pos_loc)
             glVertexAttribPointer(hud_pos_loc, 2, GL_FLOAT, GL_FALSE, 16, ctypes.c_void_p(0))
             glEnableVertexAttribArray(hud_uv_loc)
@@ -1993,29 +2275,14 @@ def main():
             glDisable(GL_BLEND)
 
         # ── Draw organism display (when stop is called) ──
-        if current_show_organism and organism_tex is not None:
-            # Draw organism image (half-screen)
+        if current_show_organism:
+            # Draw organism text overlay (fullscreen, semi-transparent)
             glEnable(GL_BLEND)
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
             glDisable(GL_DEPTH_TEST)
 
             glUseProgram(hud_prog)
             glActiveTexture(GL_TEXTURE0)
-            glBindTexture(GL_TEXTURE_2D, organism_tex)
-            glUniform1i(hud_tex_loc, 0)
-
-            glBindBuffer(GL_ARRAY_BUFFER, organism_vbo)
-            glEnableVertexAttribArray(hud_pos_loc)
-            glVertexAttribPointer(hud_pos_loc, 2, GL_FLOAT, GL_FALSE, 16, ctypes.c_void_p(0))
-            glEnableVertexAttribArray(hud_uv_loc)
-            glVertexAttribPointer(hud_uv_loc, 2, GL_FLOAT, GL_FALSE, 16, ctypes.c_void_p(8))
-
-            glDrawArrays(GL_TRIANGLE_FAN, 0, 4)
-
-            glDisableVertexAttribArray(hud_pos_loc)
-            glDisableVertexAttribArray(hud_uv_loc)
-
-            # Draw organism text overlay (fullscreen, semi-transparent)
             glBindTexture(GL_TEXTURE_2D, organism_text_tex)
             glUniform1i(hud_tex_loc, 0)
 
