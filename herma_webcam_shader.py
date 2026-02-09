@@ -57,7 +57,7 @@ TARGET_ASPECT = 16.0 / 9.0
 # rect3 is the top green square, rect4 is the bottom purple square
 P = dict(
     heightScale=0.3, dripSpeed=0.4, distortion=0.5, ringCount=8.0,
-    terrainHue=-0.35, terrainSat=1.0, terrainBright=1.0, terrainContrast=1.0,
+    terrainHue=-0.08, terrainSat=1.0, terrainBright=1.0, terrainContrast=1.0,
     rect1X=0.5, rect1Y=0.42, rect1W=0.21, rect1H=0.2,
     rect1Elev=0.3, rect1Blend=0.25,
     rect1Hue=0.0, rect1Sat=1.0, rect1Bright=1.0, rect1Contrast=1.0,
@@ -1270,6 +1270,7 @@ def analyse_video(folder_name: str):
     url = f"http://{parsed.hostname}:5002/api/analyse-video-agents"
     print(f"Starting video analysis for folder: {folder_name}")
     current_overlay_text = None  # track the text so we can re-use it when image arrives
+    organism_info = {}  # track organism fields for /api/chatready
     try:
         response = requests.post(
            url,
@@ -1294,6 +1295,12 @@ def analyse_video(folder_name: str):
                             and data.get('data')):
                         desc = data['data'].get('visual_description', '')
                         name = data['data'].get('organism_name', '')
+                        sys_desc = data['data'].get('system_description', '')
+                        organism_info = {
+                            'organism_name': name,
+                            'visual_description': desc,
+                            'system_description': sys_desc,
+                        }
                         if desc:
                             current_overlay_text = f"{name}\n\n{desc}" if name else desc
                             _set_organism_text(current_overlay_text)
@@ -1309,6 +1316,13 @@ def analyse_video(folder_name: str):
                             if pil_img and current_overlay_text:
                                 _set_organism_text(current_overlay_text, image=pil_img)
                                 print("Organism image displayed")
+                                # Notify herma server that chat is ready
+                                try:
+                                    chatready_url = f"http://{parsed.hostname}:5002/api/chatready"
+                                    requests.post(chatready_url, json=organism_info, timeout=5)
+                                    print(f"Sent /api/chatready to {chatready_url}")
+                                except Exception as e:
+                                    print(f"Failed to send /api/chatready: {e}")
 
                     if data.get('done') or data.get('error'):
                         break
