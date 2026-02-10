@@ -58,7 +58,7 @@ TARGET_ASPECT = 16.0 / 9.0
 P = dict(
     heightScale=0.3, dripSpeed=0.4, distortion=0.5, ringCount=8.0,
     terrainHue=-0.08, terrainSat=1.0, terrainBright=1.0, terrainContrast=1.0,
-    rect1X=0.5, rect1Y=0.42, rect1W=0.21, rect1H=0.2,
+    rect1X=0.5, rect1Y=0.5, rect1W=0.42, rect1H=0.4,
     rect1Elev=0.3, rect1Blend=0.25,
     rect1Hue=0.0, rect1Sat=1.0, rect1Bright=1.0, rect1Contrast=1.0,
     rect3X=0.0, rect3Y=0.86, rect3W=0.22, rect3H=0.06,
@@ -133,7 +133,6 @@ intro_lock = threading.Lock()
 show_organism = False
 organism_lock = threading.Lock()
 organism_overlay_text = ORGANISM_TEXT  # Dynamic text shown on organism screen
-organism_overlay_image = None  # PIL Image for generated organism (400x400)
 organism_text_dirty = False  # Flag to signal render loop to re-upload texture
 
 # Chat display state
@@ -163,7 +162,7 @@ def reset_to_initial_state():
     """Reset all shared state back to initial startup defaults."""
     global manual_record_command, recording_start_time, current_status
     global intro_state, show_organism, show_chat, chat_messages, latest_jpeg
-    global organism_overlay_text, organism_overlay_image, organism_text_dirty
+    global organism_overlay_text, organism_text_dirty
 
     # Stop recording mode + timers
     with control_lock:
@@ -185,7 +184,6 @@ def reset_to_initial_state():
     with organism_lock:
         show_organism = False
         organism_overlay_text = ORGANISM_TEXT
-        organism_overlay_image = None
         organism_text_dirty = True
 
     with chat_lock:
@@ -901,10 +899,8 @@ def _animated_dots():
     return "." * (int(time.time() * 2) % 3 + 1)
 
 
-def render_organism_overlay(text, width, height, organism_img=None):
-    """Render organism name + description with a grey translucent panel sized to fit the text,
-    leaving space for a 400x400 image on the right. If organism_img (PIL Image) is provided,
-    it is drawn in that space."""
+def render_organism_overlay(text, width, height):
+    """Render organism name + description with a grey translucent panel sized to fit the text."""
     pil_img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(pil_img)
 
@@ -914,17 +910,15 @@ def render_organism_overlay(text, width, height, organism_img=None):
     # Animate dots on any "Loading" text
     dots = _animated_dots()
     text = text.replace("Loading organism", f"Loading organism{dots}")
-    text = text.replace("Loading image", f"Loading image{dots}")
 
     # Layout constants
-    img_size = 400
     panel_padding = 30
     line_height = 38
     title_line_height = 56
     title_bottom_gap = 20
 
-    # Max text area width (screen minus padding, image space, gaps)
-    max_text_area_w = width - panel_padding * 3 - img_size
+    # Max text area width (screen minus padding on both sides)
+    max_text_area_w = width - panel_padding * 4
 
     # Split title from description
     parts = text.strip().split('\n', 1)
@@ -976,9 +970,7 @@ def render_organism_overlay(text, width, height, organism_img=None):
 
     # Panel dimensions sized to fit content
     panel_h = content_h + panel_padding * 2
-    panel_w = max_text_area_w + img_size + panel_padding * 3
-    # Ensure panel is tall enough for the image
-    panel_h = max(panel_h, img_size + panel_padding * 2)
+    panel_w = max_text_area_w + panel_padding * 2
 
     # Centre the panel on screen
     panel_x = (width - panel_w) // 2
@@ -1003,30 +995,6 @@ def render_organism_overlay(text, width, height, organism_img=None):
         if bl:
             draw.text((text_x, text_y), bl, font=body_font, fill=(220, 220, 220, 255))
         text_y += line_height
-
-    # Draw organism image or pulsing placeholder (right side, vertically centred in panel)
-    img_x = panel_x + panel_w - panel_padding - img_size
-    img_y = panel_y + (panel_h - img_size) // 2
-    if organism_img is not None:
-        pil_img.paste(organism_img, (img_x, img_y))
-    elif text.strip():
-        # Pulsing placeholder while image is loading
-        import math
-        pulse = (math.sin(time.time() * 3.0) + 1.0) / 2.0  # 0.0 to 1.0
-        alpha = int(40 + pulse * 80)  # pulse between 40 and 120
-        draw.rectangle(
-            [(img_x, img_y), (img_x + img_size, img_y + img_size)],
-            fill=(80, 80, 80, alpha))
-        # "Loading image..." text centred in the placeholder
-        loading_font = _load_font(20)
-        loading_text = f"Loading image{dots}"
-        lt_bbox = draw.textbbox((0, 0), loading_text, font=loading_font)
-        lt_w = lt_bbox[2] - lt_bbox[0]
-        lt_h = lt_bbox[3] - lt_bbox[1]
-        lt_alpha = int(120 + pulse * 135)  # pulse between 120 and 255
-        draw.text(
-            (img_x + (img_size - lt_w) // 2, img_y + (img_size - lt_h) // 2),
-            loading_text, font=loading_font, fill=(180, 180, 180, lt_alpha))
 
     img = np.array(pil_img, dtype=np.uint8)
     img = cv2.flip(img, 0)  # flip vertically for GL texture origin
@@ -1074,6 +1042,9 @@ def render_chat_messages(messages, width, height):
         if current_line:
             lines.append(current_line)
 
+        if not lines:
+            continue
+
         # Calculate bubble dimensions
         max_line_width = max([draw.textbbox((0, 0), line, font=font)[2] - draw.textbbox((0, 0), line, font=font)[0] for line in lines])
         bubble_width = max_line_width + (bubble_padding * 2)
@@ -1115,13 +1086,13 @@ def render_chat_messages(messages, width, height):
         if sender == "organism":
             # Left side - organism messages
             bubble_x = padding
-            text_color = (200, 255, 200, 255)  # Light green
-            bubble_color = (40, 80, 40, 220)   # Dark green background
+            text_color = (255, 255, 255, 255)  # White text
+            bubble_color = (0, 0, 0, 220)      # Black background
         else:
             # Right side - user messages
             bubble_x = width - bw - padding
-            text_color = (200, 220, 255, 255)  # Light blue
-            bubble_color = (40, 60, 100, 220)  # Dark blue background
+            text_color = (0, 0, 0, 255)        # Black text
+            bubble_color = (255, 255, 255, 220) # White background
 
         bubble_y = y_position
 
@@ -1153,12 +1124,12 @@ def render_chat_messages(messages, width, height):
 
     if dots_sender == "organism":
         dots_x = padding
-        dots_text_color = (200, 255, 200, 255)
-        dots_bubble_color = (40, 80, 40, 220)
+        dots_text_color = (255, 255, 255, 255)
+        dots_bubble_color = (0, 0, 0, 220)
     else:
         dots_x = width - dots_bw - padding
-        dots_text_color = (200, 220, 255, 255)
-        dots_bubble_color = (40, 60, 100, 220)
+        dots_text_color = (0, 0, 0, 255)
+        dots_bubble_color = (255, 255, 255, 220)
 
     if y_position + dots_bh >= 0:
         draw.rectangle(
@@ -1192,13 +1163,11 @@ def timestamp_folder_name():
     return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
 
-def _set_organism_text(text, image=None):
-    """Update the organism overlay text (and optionally image) from any thread."""
-    global organism_overlay_text, organism_overlay_image, organism_text_dirty
+def _set_organism_text(text):
+    """Update the organism overlay text from any thread."""
+    global organism_overlay_text, organism_text_dirty
     with organism_lock:
         organism_overlay_text = text
-        if image is not None:
-            organism_overlay_image = image
         organism_text_dirty = True
 
 
@@ -1211,6 +1180,12 @@ def upload_sequence(seq_dir: Path, image_count: int):
     if actual_image_count == 0:
         print(f"No images found in {seq_dir}")
         return False
+    # Only upload first and last images
+    if actual_image_count == 1:
+        image_files = [image_files[0]]
+    else:
+        image_files = [image_files[0], image_files[-1]]
+    actual_image_count = len(image_files)
     file_handles = []
     try:
         print(f"Uploading {actual_image_count} images from {seq_dir.name}...")
@@ -1246,36 +1221,17 @@ def upload_sequence(seq_dir: Path, image_count: int):
             fh.close()
 
 
-def _download_organism_image(image_url):
-    """Download an image from a URL and return it as a PIL Image sized to 400x400."""
-    try:
-        print(f"Downloading organism image from {image_url[:80]}...")
-        resp = requests.get(image_url, timeout=60)
-        if not resp.ok:
-            print(f"Image download failed: {resp.status_code}")
-            return None
-        from io import BytesIO
-        img = Image.open(BytesIO(resp.content)).convert("RGBA")
-        img = img.resize((400, 400), Image.LANCZOS)
-        print("Organism image downloaded and resized to 400x400")
-        return img
-    except Exception as e:
-        print(f"Image download error: {e}")
-        return None
-
-
 def analyse_video(folder_name: str):
-    """Call the video analysis endpoint (SSE), wait for agent2b/2c, and display results."""
+    """Call the video analysis endpoint (SSE), wait for agent2b, and display results."""
     parsed = urlparse(AWS_UPLOAD_URL)
     url = f"http://{parsed.hostname}:5002/api/analyse-video-agents"
     print(f"Starting video analysis for folder: {folder_name}")
-    current_overlay_text = None  # track the text so we can re-use it when image arrives
     organism_info = {}  # track organism fields for /api/chatready
     try:
         response = requests.post(
            url,
            json={"folder": folder_name},
-           params={"agent3": "false"},
+           params={"agent2c": "false", "agent3": "false"},
            stream=True,
            timeout=300,
         )
@@ -1289,7 +1245,7 @@ def analyse_video(folder_name: str):
                     data = json.loads(line[6:])
                     print(f"Analysis: {data}")
 
-                    # When agent2b completes, show the visual description
+                    # When agent2b completes, show the visual description and send chatready
                     if (data.get('stage') == 'agent2b'
                             and data.get('status') == 'complete'
                             and data.get('data')):
@@ -1302,27 +1258,16 @@ def analyse_video(folder_name: str):
                             'system_description': sys_desc,
                         }
                         if desc:
-                            current_overlay_text = f"{name}\n\n{desc}" if name else desc
-                            _set_organism_text(current_overlay_text)
+                            overlay_text = f"{name}\n\n{desc}" if name else desc
+                            _set_organism_text(overlay_text)
                             print(f"Organism visual description set: {name}")
-
-                    # When agent2c completes, download and display the organism image
-                    if (data.get('stage') == 'agent2c'
-                            and data.get('status') == 'complete'
-                            and data.get('data')):
-                        image_url = data['data'].get('image_url', '')
-                        if image_url:
-                            pil_img = _download_organism_image(image_url)
-                            if pil_img and current_overlay_text:
-                                _set_organism_text(current_overlay_text, image=pil_img)
-                                print("Organism image displayed")
-                                # Notify herma server that chat is ready
-                                try:
-                                    chatready_url = f"http://{parsed.hostname}:5002/api/chatready"
-                                    requests.post(chatready_url, json=organism_info, timeout=5)
-                                    print(f"Sent /api/chatready to {chatready_url}")
-                                except Exception as e:
-                                    print(f"Failed to send /api/chatready: {e}")
+                            # Notify herma server that chat is ready
+                            try:
+                                chatready_url = f"http://{parsed.hostname}:5002/api/chatready"
+                                requests.post(chatready_url, json=organism_info, timeout=5)
+                                print(f"Sent /api/chatready to {chatready_url}")
+                            except Exception as e:
+                                print(f"Failed to send /api/chatready: {e}")
 
                     if data.get('done') or data.get('error'):
                         break
@@ -1445,9 +1390,9 @@ def api_next():
 def api_chat():
     global show_chat, chat_messages, show_organism
     data = flask_request.get_json() or {}
-    message = data.get("message", "Chat message")
+    message = data.get("message", "Hello")
     sender = data.get("sender", "user")  # "organism" or "user"
-    
+
     # Validate sender
     if sender not in ["organism", "user"]:
         return jsonify({"error": "sender must be 'organism' or 'user'"}), 400
@@ -1897,7 +1842,7 @@ def main():
 
     # ── Recording / motion state ──
     global latest_jpeg, manual_record_command, current_status, recording_start_time, intro_state, show_organism, show_chat, chat_messages
-    global organism_text_dirty, organism_overlay_text, organism_overlay_image
+    global organism_text_dirty, organism_overlay_text
     OUTPUT_DIR_API.mkdir(parents=True, exist_ok=True)
     OUTPUT_DIR_AUTO.mkdir(parents=True, exist_ok=True)
 
@@ -1944,7 +1889,6 @@ def main():
             current_show_organism = show_organism
             current_organism_text_dirty = organism_text_dirty
             current_organism_text = organism_overlay_text
-            current_organism_image = organism_overlay_image
             organism_text_dirty = False
         
         if consume_restart_request():
@@ -1976,13 +1920,10 @@ def main():
     
             continue
 
-        # Re-render organism text texture when it changes
-        # Re-render organism overlay when dirty, or every frame while pulsing placeholder
-        organism_needs_render = current_organism_text_dirty or (
-            current_show_organism and current_organism_text.strip()
-            and current_organism_image is None)
-        if organism_needs_render:
-            organism_text_img = render_organism_overlay(current_organism_text, 1920, 1080, organism_img=current_organism_image)
+        # Re-render organism text texture when it changes, or every frame while loading (to animate dots)
+        organism_is_loading = current_show_organism and "Loading" in current_organism_text
+        if current_organism_text_dirty or organism_is_loading:
+            organism_text_img = render_organism_overlay(current_organism_text, 1920, 1080)
             glBindTexture(GL_TEXTURE_2D, organism_text_tex)
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1920, 1080, 0,
                          GL_RGBA, GL_UNSIGNED_BYTE, organism_text_img)
