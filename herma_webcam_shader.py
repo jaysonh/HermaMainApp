@@ -1833,6 +1833,9 @@ def main():
             is_fullscreen[0] = not is_fullscreen[0]
         if key == glfw.KEY_SPACE and action == glfw.PRESS:
             show_hud[0] = not show_hud[0]
+        if key == glfw.KEY_R and action == glfw.PRESS:
+            print("Key: Reset to initial state")
+            request_restart()
 
     glfw.set_scroll_callback(win, on_scroll)
     glfw.set_key_callback(win, on_key)
