@@ -101,8 +101,7 @@ def _load_font(size):
         print(f"Warning: Could not load {_FONT_PATH}, falling back to default font")
         return ImageFont.load_default()
 
-ONBOARDING_TEXT = """Welcome to Hermaphrogenesis
-blah blah blah blah"""
+ONBOARDING_TEXT = "The objects in front of you are precise replicas of human internal organs.You are invited to make your own arrangement, using as many or as few as you wish.Pick up the first organ to start creating a new anatomy."
 
 ORGANISM_TEXT = ""
 
@@ -852,11 +851,11 @@ def render_overlay_text(text, width, height):
     """Render multi-line text centered on a semi-transparent background with word wrapping."""
     pil_img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(pil_img)
-    font = _load_font(32)
+    font = _load_font(64)
 
     margin = 80
     max_text_width = width - margin * 2
-    line_height = 50
+    line_height = 90
 
     # Word-wrap each paragraph
     wrapped_lines = []
@@ -882,12 +881,20 @@ def render_overlay_text(text, width, height):
     total_height = len(wrapped_lines) * line_height
     y_start = (height - total_height) // 2
 
+    # Draw semi-transparent grey background behind text
+    pad = 30
+    bg_x0 = margin - pad
+    bg_y0 = y_start - pad
+    bg_x1 = width - margin + pad
+    bg_y1 = y_start + total_height + pad
+    draw.rectangle([bg_x0, bg_y0, bg_x1, bg_y1], fill=(128, 128, 128, 160))
+
     for i, line in enumerate(wrapped_lines):
         bbox = draw.textbbox((0, 0), line, font=font)
         text_w = bbox[2] - bbox[0]
         x = (width - text_w) // 2
         y = y_start + i * line_height
-        draw.text((x, y), line, font=font, fill=(255, 255, 255, 255))
+        draw.text((x, y), line, font=font, fill=(0, 0, 0, 255))
 
     img = np.array(pil_img, dtype=np.uint8)
     img = cv2.flip(img, 0)  # flip vertically for GL texture origin
@@ -1429,6 +1436,29 @@ def api_clear_chat():
     return jsonify({"status": "ok", "action": "clear_chat", "show_chat": False})
 
 
+@flask_app.post("/api/snapshot")
+@localhost_or_api_key
+def api_snapshot():
+    with jpeg_lock:
+        frame_bytes = latest_jpeg
+    if frame_bytes is None:
+        return jsonify({"status": "error", "message": "No webcam frame available"}), 503
+    try:
+        parsed = urlparse(AWS_UPLOAD_URL)
+        snapshot_url = f"http://{parsed.hostname}:{parsed.port}/api/snapshot"
+        resp = requests.post(
+            snapshot_url,
+            headers={"X-API-Key": AWS_UPLOAD_KEY},
+            files={"image": ("snapshot.jpg", frame_bytes, "image/jpeg")},
+            timeout=10,
+        )
+        print(f"API: Snapshot sent to {snapshot_url} — {resp.status_code}")
+        return jsonify({"status": "ok", "action": "snapshot", "server_status": resp.status_code})
+    except Exception as e:
+        print(f"API: Snapshot upload failed: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 502
+
+
 @flask_app.get("/api/status")
 def api_status():
     with control_lock:
@@ -1868,7 +1898,7 @@ def main():
     threading.Thread(target=run_web_server, daemon=True).start()
 
     print(f"Web server: http://{WEB_HOST}:{WEB_PORT}/")
-    print(f"API endpoints: /api/start, /api/stop, /api/auto, /api/status, /api/begin, /api/next, /api/end")
+    print(f"API endpoints: /api/start, /api/stop, /api/auto, /api/status, /api/begin, /api/next, /api/end, /api/snapshot")
     print(f"Upload URL: {AWS_UPLOAD_URL}")
     print(f"Recording timeout: {RECORDING_TIMEOUT}s, Capture interval: {CAPTURE_INTERVAL}s")
     print("Intro state: logo (waiting for /api/begin)")
