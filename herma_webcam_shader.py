@@ -112,6 +112,7 @@ CORS(flask_app)
 
 latest_jpeg = None
 jpeg_lock = threading.Lock()
+webcam_cap = None  # set once the camera is opened in main()
 
 control_lock = threading.Lock()
 manual_record_command = None
@@ -1441,14 +1442,19 @@ def api_clear_chat():
 def api_snapshot():
     with jpeg_lock:
         frame_bytes = latest_jpeg
+    if frame_bytes is None and webcam_cap is not None:
+        ret, frame = webcam_cap.read()
+        if ret:
+            ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
+            if ok:
+                frame_bytes = buf.tobytes()
     if frame_bytes is None:
         return jsonify({"status": "error", "message": "No webcam frame available"}), 503
     try:
         parsed = urlparse(AWS_UPLOAD_URL)
-        snapshot_url = f"http://{parsed.hostname}:{parsed.port}/api/snapshot"
+        snapshot_url = f"http://{parsed.hostname}:5002/api/snapshot"
         resp = requests.post(
             snapshot_url,
-            headers={"X-API-Key": AWS_UPLOAD_KEY},
             files={"image": ("snapshot.jpg", frame_bytes, "image/jpeg")},
             timeout=10,
         )
@@ -1646,7 +1652,9 @@ def main():
     windowed_size = [WINDOW_W, WINDOW_H]
 
     # Open webcam
+    global webcam_cap
     cap = cv2.VideoCapture(cam_idx)
+    webcam_cap = cap
     if not cap.isOpened():
         print(f"Cannot open camera index {cam_idx}")
         glfw.terminate()
