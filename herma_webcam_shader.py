@@ -19,6 +19,7 @@ import time
 import threading
 import ctypes
 import json
+import math
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -189,6 +190,11 @@ def reset_to_initial_state():
     with chat_lock:
         show_chat = False
         chat_messages = []
+
+    # Stop any running sentence sequence
+    global sentences_stop
+    with sentences_lock:
+        sentences_stop = True
 
     # Clear MJPEG frame
     with jpeg_lock:
@@ -1349,8 +1355,9 @@ def api_stop():
         show_organism = True
     with chat_lock:
         show_chat = False
-    print("API: Stop recording requested - showing organism display")
-    return jsonify({"status": "ok", "action": "stop_recording", "show_organism": True})
+    _set_organism_text("Loading")
+    print("API: Stop recording requested - waiting for sentences")
+    return jsonify({"status": "ok", "action": "stop_recording", "waiting_for_sentences": True})
 
 
 @flask_app.post("/api/auto")
@@ -1437,6 +1444,115 @@ def api_clear_chat():
     return jsonify({"status": "ok", "action": "clear_chat", "show_chat": False})
 
 
+# Sentences display state
+sentences_lock = threading.Lock()
+sentences_active = False  # True while a sentence sequence is playing
+sentences_stop = False    # Flag to cancel a running sequence
+
+
+def _sentences_worker(sentences, seconds_per_char):
+    """Background thread that cycles through sentences, displaying each one.
+    Expects show_organism to already be True (set by /api/stop)."""
+    global sentences_active, sentences_stop, show_organism
+    try:
+        for sentence in sentences:
+            with sentences_lock:
+                if sentences_stop:
+                    break
+
+            _set_organism_text(sentence)
+
+            # Display time proportional to sentence length (min 1s)
+            display_time = max(1.0, len(sentence) * seconds_per_char)
+            print(f"API: Displaying sentence ({display_time:.1f}s): {sentence[:60]}...")
+
+            # Sleep in small increments so we can respond to stop requests
+            elapsed = 0.0
+            while elapsed < display_time:
+                with sentences_lock:
+                    if sentences_stop:
+                        break
+                time.sleep(0.1)
+                elapsed += 0.1
+    finally:
+        with sentences_lock:
+            was_stopped = sentences_stop
+            sentences_active = False
+            sentences_stop = False
+
+        # Show thank-you message for 10 seconds, then restart both machines
+        if not was_stopped:
+            _set_organism_text("Thank you for your experience")
+            print("API: Showing thank-you message for 10s")
+            time.sleep(10)
+
+        # Send /api/end to the other computer
+        try:
+            parsed = urlparse(AWS_UPLOAD_URL)
+            remote_end_url = f"http://{parsed.hostname}:8000/api/end"
+            resp = requests.post(remote_end_url,
+                                 headers={"X-API-Key": API_KEY},
+                                 timeout=5)
+            print(f"API: Sent /api/end to {remote_end_url} — {resp.status_code}")
+        except Exception as e:
+            print(f"API: Failed to send /api/end to remote: {e}")
+
+        # Restart this machine back to logo / HERMAPHROGENESIS screen
+        request_restart()
+        print("API: Sentences finished - restarting to initial state")
+
+
+@flask_app.post("/api/sentences")
+@localhost_or_api_key
+def api_sentences():
+    global sentences_active, sentences_stop
+    data = flask_request.get_json() or {}
+    sentences = data.get("sentences", [])
+    seconds_per_char = data.get("seconds_per_char", 0.05)
+
+    if not isinstance(sentences, list) or len(sentences) == 0:
+        return jsonify({"error": "Must provide a non-empty 'sentences' array"}), 400
+
+    # Stop any currently running sequence
+    with sentences_lock:
+        if sentences_active:
+            sentences_stop = True
+
+    # Wait briefly for previous worker to finish
+    for _ in range(20):
+        with sentences_lock:
+            if not sentences_active:
+                break
+        time.sleep(0.1)
+
+    with sentences_lock:
+        sentences_active = True
+        sentences_stop = False
+
+    threading.Thread(target=_sentences_worker, args=(sentences, seconds_per_char), daemon=True).start()
+
+    total_time = sum(max(1.0, len(s) * seconds_per_char) for s in sentences)
+    print(f"API: Starting sentences display ({len(sentences)} sentences, ~{total_time:.1f}s total)")
+    return jsonify({
+        "status": "ok",
+        "action": "sentences",
+        "sentence_count": len(sentences),
+        "estimated_total_seconds": round(total_time, 1),
+        "seconds_per_char": seconds_per_char,
+    })
+
+
+@flask_app.post("/api/sentences/stop")
+@localhost_or_api_key
+def api_sentences_stop():
+    global sentences_stop
+    with sentences_lock:
+        if not sentences_active:
+            return jsonify({"status": "ok", "message": "No sentences playing"})
+        sentences_stop = True
+    return jsonify({"status": "ok", "action": "sentences_stop"})
+
+
 @flask_app.post("/api/snapshot")
 @localhost_or_api_key
 def api_snapshot():
@@ -1476,13 +1592,15 @@ def api_status():
         with intro_lock:
             with organism_lock:
                 with chat_lock:
-                    return jsonify({**current_status, "mode": mode,
-                                    "time_remaining": time_remaining,
-                                    "intro_state": intro_state,
-                                    "show_organism": show_organism,
-                                    "show_chat": show_chat,
-                                    "chat_messages": chat_messages,
-                                    "chat_message_count": len(chat_messages)})
+                    with sentences_lock:
+                        return jsonify({**current_status, "mode": mode,
+                                        "time_remaining": time_remaining,
+                                        "intro_state": intro_state,
+                                        "show_organism": show_organism,
+                                        "show_chat": show_chat,
+                                        "chat_messages": chat_messages,
+                                        "chat_message_count": len(chat_messages),
+                                        "sentences_active": sentences_active})
 
 
 def run_web_server():
@@ -1906,7 +2024,7 @@ def main():
     threading.Thread(target=run_web_server, daemon=True).start()
 
     print(f"Web server: http://{WEB_HOST}:{WEB_PORT}/")
-    print(f"API endpoints: /api/start, /api/stop, /api/auto, /api/status, /api/begin, /api/next, /api/end, /api/snapshot")
+    print(f"API endpoints: /api/start, /api/stop, /api/auto, /api/status, /api/begin, /api/next, /api/end, /api/snapshot, /api/sentences")
     print(f"Upload URL: {AWS_UPLOAD_URL}")
     print(f"Recording timeout: {RECORDING_TIMEOUT}s, Capture interval: {CAPTURE_INTERVAL}s")
     print("Intro state: logo (waiting for /api/begin)")
@@ -2113,10 +2231,18 @@ def main():
                             latest_jpeg = buf.tobytes()
                     last_stream_time = now2
 
-                # Draw recording indicator
+                # Draw recording indicator (blinking, anti-aliased)
                 if recording:
                     fh_rec, fw_rec = frame.shape[:2]
-                    cv2.circle(frame, (fw_rec - 50, 50), 12, (0, 0, 255), -1)
+                    # Blink: use a sine wave so the dot fades smoothly in and out
+                    blink_alpha = (math.sin(now * 4.0) + 1.0) / 2.0  # 0..1, ~2 Hz
+                    if blink_alpha > 0.05:
+                        center = (fw_rec - 50, 50)
+                        radius = 12
+                        # Draw anti-aliased circle via overlay with alpha
+                        overlay = frame.copy()
+                        cv2.circle(overlay, center, radius, (0, 0, 255), -1, cv2.LINE_AA)
+                        cv2.addWeighted(overlay, blink_alpha, frame, 1.0 - blink_alpha, 0, frame)
 
                 # Upload to GL texture
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
