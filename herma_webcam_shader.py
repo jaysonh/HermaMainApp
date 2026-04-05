@@ -1486,16 +1486,16 @@ def _sentences_worker(sentences, seconds_per_char):
             print("API: Showing thank-you message for 10s")
             time.sleep(10)
 
-        # Send /api/end to the other computer
+        # Send /api/restart to the SentiChat backend on the other computer
         try:
             parsed = urlparse(AWS_UPLOAD_URL)
-            remote_end_url = f"http://{parsed.hostname}:8000/api/end"
-            resp = requests.post(remote_end_url,
+            remote_url = f"http://{parsed.hostname}:5002/api/restart"
+            resp = requests.post(remote_url,
                                  headers={"X-API-Key": API_KEY},
                                  timeout=5)
-            print(f"API: Sent /api/end to {remote_end_url} — {resp.status_code}")
+            print(f"API: Sent /api/restart to {remote_url} — {resp.status_code}")
         except Exception as e:
-            print(f"API: Failed to send /api/end to remote: {e}")
+            print(f"API: Failed to send /api/restart to remote: {e}")
 
         # Restart this machine back to logo / HERMAPHROGENESIS screen
         request_restart()
