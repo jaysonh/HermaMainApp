@@ -327,14 +327,18 @@ def api_status():
             with state.organism_lock:
                 with state.chat_lock:
                     with state.sentences_lock:
-                        return jsonify({**state.current_status, "mode": mode,
-                                        "time_remaining": time_remaining,
-                                        "intro_state": state.intro_state,
-                                        "show_organism": state.show_organism,
-                                        "show_chat": state.show_chat,
-                                        "chat_messages": state.chat_messages,
-                                        "chat_message_count": len(state.chat_messages),
-                                        "sentences_active": state.sentences_active})
+                        status = {**state.current_status,
+                                  "mode": mode,
+                                  "time_remaining": time_remaining,
+                                  "intro_state": state.intro_state,
+                                  "show_organism": state.show_organism,
+                                  "show_chat": state.show_chat,
+                                  "chat_messages": state.chat_messages,
+                                  "chat_message_count": len(state.chat_messages),
+                                  "sentences_active": state.sentences_active}
+                        # back-compat alias
+                        status.setdefault("images_captured", status.get("frames_captured"))
+                        return jsonify(status)
 
 
 def run_web_server():

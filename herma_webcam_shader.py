@@ -88,6 +88,11 @@ WEB_PORT = 8000
 STREAM_FPS = 10
 JPEG_QUALITY = 80
 
+VIDEO_WIDTH = 640
+VIDEO_HEIGHT = 480
+VIDEO_FPS = 10
+VIDEO_FRAME_INTERVAL = 1.0 / VIDEO_FPS
+
 API_KEY = os.environ.get("MONITOR_API_KEY", "jayson")
 AWS_UPLOAD_URL = os.environ.get("AWS_UPLOAD_URL", "http://10.142.77.6:5009/api/upload")
 AWS_UPLOAD_KEY = os.environ.get("AWS_UPLOAD_KEY", "jayson")
@@ -117,8 +122,8 @@ manual_record_command = None
 recording_start_time = None
 current_status = {
     "recording": False,
-    "sequence_dir": None,
-    "images_captured": 0,
+    "video_path": None,
+    "frames_captured": 0,
     "last_motion_time": None,
     "time_remaining": None,
 }
@@ -173,8 +178,8 @@ def reset_to_initial_state():
         recording_start_time = None
         current_status = {
             "recording": False,
-            "sequence_dir": None,
-            "images_captured": 0,
+            "video_path": None,
+            "frames_captured": 0,
             "last_motion_time": None,
             "time_remaining": None,
         }
@@ -580,44 +585,27 @@ def _set_organism_text(text):
         organism_text_dirty = True
 
 
-def upload_sequence(seq_dir: Path, image_count: int):
-    if image_count == 0:
-        print("No images to upload.")
+def upload_video(video_path: Path):
+    if not video_path.exists():
+        print(f"No video to upload: {video_path}")
         return False
-    image_files = sorted(seq_dir.glob("img_*.webp"))
-    actual_image_count = len(image_files)
-    if actual_image_count == 0:
-        print(f"No images found in {seq_dir}")
-        return False
-    # Only upload first and last images
-    if actual_image_count == 1:
-        image_files = [image_files[0]]
-    else:
-        image_files = [image_files[0], image_files[-1]]
-    actual_image_count = len(image_files)
-    file_handles = []
     try:
-        print(f"Uploading {actual_image_count} images from {seq_dir.name}...")
-        files = []
-        for img_path in image_files:
-            fh = open(img_path, "rb")
-            file_handles.append(fh)
-            files.append(("files", (img_path.name, fh, "image/webp")))
-        response = requests.post(
-            AWS_UPLOAD_URL,
-            headers={"X-API-Key": AWS_UPLOAD_KEY},
-            files=files,
-            data={
-                "sequence_name": seq_dir.name,
-                "image_count": actual_image_count,
-                "timestamp": datetime.now().isoformat(),
-            },
-            timeout=120,
-        )
+        print(f"Uploading video {video_path.name}...")
+        with open(video_path, "rb") as fh:
+            response = requests.post(
+                AWS_UPLOAD_URL,
+                headers={"X-API-Key": AWS_UPLOAD_KEY},
+                files={"file": (video_path.name, fh, "video/mp4")},
+                data={
+                    "sequence_name": video_path.stem,
+                    "timestamp": datetime.now().isoformat(),
+                },
+                timeout=120,
+            )
         if response.ok:
             print(f"Upload successful: {response.json()}")
             _set_organism_text("Loading organism")
-            analyse_video(seq_dir.name)
+            analyse_video(video_path.stem)
             return True
         else:
             print(f"Upload failed: {response.status_code} - {response.text}")
@@ -625,9 +613,6 @@ def upload_sequence(seq_dir: Path, image_count: int):
     except requests.exceptions.RequestException as e:
         print(f"Upload error: {e}")
         return False
-    finally:
-        for fh in file_handles:
-            fh.close()
 
 
 def analyse_video(folder_name: str):
@@ -1085,8 +1070,11 @@ def main():
     bg = None
     recording = False
     seq_dir = None
+    video_writer = None
+    video_path = None
     last_motion_time = 0.0
     last_capture_time = 0.0
+    last_video_frame_time = 0.0
     img_index = 0
     last_stream_time = 0.0
     stream_interval = 1.0 / float(STREAM_FPS)
@@ -1100,6 +1088,8 @@ def main():
     # Start Flask web server in background. Imported here (rather than at the
     # top of the file) so all module-level state is fully initialised before
     # web.py's `import herma_webcam_shader as state` resolves.
+    # Make web.py's import point at this same module object (not a duplicate).
+    sys.modules['herma_webcam_shader'] = sys.modules['__main__']
     import web
     threading.Thread(target=web.run_web_server, daemon=True).start()
 
@@ -1117,6 +1107,9 @@ def main():
         # Get current intro state
         with intro_lock:
             current_intro_state = intro_state
+        if current_intro_state != getattr(main, '_last_intro_state', None):
+            print(f"Render loop: intro_state → {current_intro_state}")
+            main._last_intro_state = current_intro_state
 
         # Get current chat state
         with chat_lock:
@@ -1136,11 +1129,16 @@ def main():
             reset_to_initial_state()
 
             # Reset local loop state too
+            if video_writer is not None:
+                video_writer.release()
+                video_writer = None
+            video_path = None
             bg = None
             recording = False
             seq_dir = None
             last_motion_time = 0.0
             last_capture_time = 0.0
+            last_video_frame_time = 0.0
             img_index = 0
             last_stream_time = 0.0
             api_triggered_recording = False
@@ -1180,6 +1178,8 @@ def main():
         if current_intro_state == "running" and not current_show_chat:
             # Read webcam frame
             ret, frame = cap.read()
+            if not ret:
+                print("WARNING: cap.read() failed - webcam not delivering frames")
             if ret:
                 # Downscale if needed
                 if DOWNSCALE_WIDTH is not None:
@@ -1250,33 +1250,40 @@ def main():
                     recording = True
                     img_index = 0
                     last_capture_time = 0.0
+                    last_video_frame_time = 0.0
                     api_triggered_recording = is_api_trigger
                     output_dir = OUTPUT_DIR_API if api_triggered_recording else OUTPUT_DIR_AUTO
-                    seq_dir = output_dir / timestamp_folder_name()
-                    seq_dir.mkdir(parents=True, exist_ok=True)
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    video_path = output_dir / f"{timestamp_folder_name()}.mp4"
+                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                    video_writer = cv2.VideoWriter(
+                        str(video_path), fourcc, VIDEO_FPS, (VIDEO_WIDTH, VIDEO_HEIGHT))
                     trigger_type = "API" if api_triggered_recording else "MOTION"
-                    print(f"Started sequence: {seq_dir} (triggered by: {trigger_type})")
+                    print(f"Started video recording: {video_path} (triggered by: {trigger_type})")
 
                 # Stop sequence
                 if not should_record and recording:
                     recording = False
-                    print(f"Stopped sequence. Saved {img_index} images to {seq_dir}")
-                    if api_triggered_recording and seq_dir is not None:
-                        threading.Thread(target=upload_sequence,
-                                         args=(seq_dir, img_index), daemon=True).start()
+                    if video_writer is not None:
+                        video_writer.release()
+                        video_writer = None
+                    print(f"Stopped recording. Saved {img_index} frames to {video_path}")
+                    if api_triggered_recording and video_path is not None:
+                        threading.Thread(target=upload_video,
+                                         args=(video_path,), daemon=True).start()
                     api_triggered_recording = False
+                    video_path = None
                     with control_lock:
                         if manual_record_command == "stop":
                             manual_record_command = None
 
-                # Capture frame to disk
-                if recording and seq_dir is not None:
-                    if (now - last_capture_time) >= CAPTURE_INTERVAL:
-                        out_path = seq_dir / f"img_{img_index:05d}.webp"
-                        cv2.imwrite(str(out_path), frame,
-                                    [int(cv2.IMWRITE_WEBP_QUALITY), 80])
+                # Capture frame to video
+                if recording and video_writer is not None:
+                    if (now - last_video_frame_time) >= VIDEO_FRAME_INTERVAL:
+                        video_frame = cv2.resize(frame, (VIDEO_WIDTH, VIDEO_HEIGHT))
+                        video_writer.write(video_frame)
                         img_index += 1
-                        last_capture_time = now
+                        last_video_frame_time = now
 
                 # Update shared status
                 time_remaining = None
@@ -1285,8 +1292,8 @@ def main():
                 with control_lock:
                     current_status = {
                         "recording": recording,
-                        "sequence_dir": str(seq_dir) if seq_dir else None,
-                        "images_captured": img_index,
+                        "video_path": str(video_path) if video_path else None,
+                        "frames_captured": img_index,
                         "last_motion_time": last_motion_time,
                         "time_remaining": time_remaining,
                         "api_triggered": api_triggered_recording,
