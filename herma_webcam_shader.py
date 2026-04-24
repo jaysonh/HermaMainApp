@@ -96,6 +96,7 @@ VIDEO_FRAME_INTERVAL = 1.0 / VIDEO_FPS
 API_KEY = os.environ.get("MONITOR_API_KEY", "jayson")
 AWS_UPLOAD_URL = os.environ.get("AWS_UPLOAD_URL", "http://10.142.77.6:5009/api/upload")
 AWS_UPLOAD_KEY = os.environ.get("AWS_UPLOAD_KEY", "jayson")
+RECORDING_INPUT_TYPE = "video"  # "video" or "image_sequence" — updated at startup from HermaSentiChat
 
 # ─── Font Loading ────────────────────────────────────────────────────────────
 _FONT_PATH = str(Path(__file__).resolve().parent / "assets" / "sylfaen.ttf")
@@ -595,17 +596,17 @@ def upload_video(video_path: Path):
             response = requests.post(
                 AWS_UPLOAD_URL,
                 headers={"X-API-Key": AWS_UPLOAD_KEY},
-                files={"file": (video_path.name, fh, "video/mp4")},
+                files={"files": (video_path.name, fh, "video/mp4")},
                 data={
-                    "sequence_name": video_path.stem,
-                    "timestamp": datetime.now().isoformat(),
+                    "sequence_name": video_path.parent.name,
+                    "timestamp": video_path.parent.name,
                 },
                 timeout=120,
             )
         if response.ok:
             print(f"Upload successful: {response.json()}")
             _set_organism_text("Loading organism")
-            analyse_video(video_path.stem)
+            analyse_video(video_path)
             return True
         else:
             print(f"Upload failed: {response.status_code} - {response.text}")
@@ -615,20 +616,131 @@ def upload_video(video_path: Path):
         return False
 
 
-def analyse_video(folder_name: str):
+def fetch_recording_mode() -> str:
+    """Fetch the recording input_type from HermaSentiChat settings. Returns 'video' or 'image_sequence'."""
+    parsed = urlparse(AWS_UPLOAD_URL)
+    url = f"http://{parsed.hostname}:5002/api/settings/recording-mode"
+    try:
+        resp = requests.get(url, timeout=5)
+        if resp.ok:
+            mode = resp.json().get('input_type', 'video')
+            print(f"Recording mode from server: {mode}")
+            return mode
+    except Exception as e:
+        print(f"Could not fetch recording mode (defaulting to 'video'): {e}")
+    return 'video'
+
+
+def upload_and_analyse_images(image_paths: list, seq_name: str):
+    """Upload image frames to HermaUploadReceiver then send to HermaSentiChat for analysis."""
+    if not image_paths:
+        print("No image frames to upload")
+        return
+    parsed = urlparse(AWS_UPLOAD_URL)
+
+    # Upload to receiver
+    try:
+        print(f"Uploading {len(image_paths)} frames to receiver as sequence '{seq_name}'...")
+        open_files = []
+        multipart = []
+        for p in image_paths:
+            fh = open(p, 'rb')
+            open_files.append(fh)
+            multipart.append(('files', (Path(p).name, fh, 'image/jpeg')))
+        response = requests.post(
+            AWS_UPLOAD_URL,
+            headers={"X-API-Key": AWS_UPLOAD_KEY},
+            files=multipart,
+            data={"sequence_name": seq_name, "image_count": str(len(image_paths)), "timestamp": seq_name},
+            timeout=120,
+        )
+        for fh in open_files:
+            fh.close()
+        if response.ok:
+            print(f"Image upload successful: {response.json()}")
+        else:
+            print(f"Image upload failed: {response.status_code} - {response.text}")
+    except requests.exceptions.RequestException as e:
+        print(f"Image upload error: {e}")
+
+    # Analyse
+    _set_organism_text("Loading organism")
+    analyse_images(image_paths)
+
+
+def analyse_images(image_paths: list):
+    """Call the analyse endpoint with image frames (SSE), wait for agent2b, and display results."""
+    parsed = urlparse(AWS_UPLOAD_URL)
+    url = f"http://{parsed.hostname}:5002/api/analyse-video-agents"
+    print(f"Starting image sequence analysis ({len(image_paths)} frames)...")
+    organism_info = {}
+    try:
+        open_files = []
+        multipart = []
+        for p in image_paths:
+            fh = open(p, 'rb')
+            open_files.append(fh)
+            multipart.append(('images', (Path(p).name, fh, 'image/jpeg')))
+        response = requests.post(
+            url,
+            files=multipart,
+            params={"agent2c": "false", "agent3": "false"},
+            stream=True,
+            timeout=300,
+        )
+        for fh in open_files:
+            fh.close()
+        if not response.ok:
+            print(f"Analysis request failed: {response.status_code} - {response.text}")
+            return
+        for line in response.iter_lines():
+            if line:
+                line = line.decode('utf-8')
+                if line.startswith('data: '):
+                    data = json.loads(line[6:])
+                    print(f"Analysis: {data}")
+                    if (data.get('stage') == 'agent2b'
+                            and data.get('status') == 'complete'
+                            and data.get('data')):
+                        desc = data['data'].get('visual_description', '')
+                        name = data['data'].get('organism_name', '')
+                        sys_desc = data['data'].get('system_description', '')
+                        organism_info = {
+                            'organism_name': name,
+                            'visual_description': desc,
+                            'system_description': sys_desc,
+                        }
+                        if desc:
+                            overlay_text = f"{name}\n\n{desc}" if name else desc
+                            _set_organism_text(overlay_text)
+                            print(f"Organism visual description set: {name}")
+                            try:
+                                chatready_url = f"http://{parsed.hostname}:5002/api/chatready"
+                                requests.post(chatready_url, json=organism_info, timeout=5)
+                                print(f"Sent /api/chatready to {chatready_url}")
+                            except Exception as e:
+                                print(f"Failed to send /api/chatready: {e}")
+                    if data.get('done') or data.get('error'):
+                        break
+    except requests.exceptions.RequestException as e:
+        print(f"Analysis error: {e}")
+
+
+def analyse_video(video_path: Path):
     """Call the video analysis endpoint (SSE), wait for agent2b, and display results."""
     parsed = urlparse(AWS_UPLOAD_URL)
     url = f"http://{parsed.hostname}:5002/api/analyse-video-agents"
-    print(f"Starting video analysis for folder: {folder_name}")
+    print(f"Starting video analysis for: {video_path}")
     organism_info = {}  # track organism fields for /api/chatready
     try:
-        response = requests.post(
-           url,
-           json={"folder": folder_name},
-           params={"agent2c": "false", "agent3": "false"},
-           stream=True,
-           timeout=300,
-        )
+        with open(video_path, "rb") as fh:
+            response = requests.post(
+               url,
+               files={"video": (video_path.name, fh, "video/mp4")},
+               params={"agent2c": "false", "agent3": "false"},
+               stream=True,
+               timeout=300,
+            )
         if not response.ok:
             print(f"Analysis request failed: {response.status_code} - {response.text}")
             return
@@ -812,7 +924,7 @@ def main():
     glfw.swap_interval(1)
 
     # Build AWS upload URL from [herma_server] unless AWS_UPLOAD_URL env var overrides it
-    global AWS_UPLOAD_URL
+    global AWS_UPLOAD_URL, RECORDING_INPUT_TYPE
     AWS_UPLOAD_URL = os.environ.get("AWS_UPLOAD_URL", f"http://{herma_host}:{herma_port}/api/upload")
 
     # Resolve shader settings path (relative to script dir)
@@ -1072,6 +1184,7 @@ def main():
     seq_dir = None
     video_writer = None
     video_path = None
+    image_frame_paths = []
     last_motion_time = 0.0
     last_capture_time = 0.0
     last_video_frame_time = 0.0
@@ -1249,17 +1362,27 @@ def main():
                 if should_record and not recording:
                     recording = True
                     img_index = 0
+                    image_frame_paths = []
                     last_capture_time = 0.0
                     last_video_frame_time = 0.0
                     api_triggered_recording = is_api_trigger
+                    RECORDING_INPUT_TYPE = fetch_recording_mode()
                     output_dir = OUTPUT_DIR_API if api_triggered_recording else OUTPUT_DIR_AUTO
                     output_dir.mkdir(parents=True, exist_ok=True)
-                    video_path = output_dir / f"{timestamp_folder_name()}.mp4"
-                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                    video_writer = cv2.VideoWriter(
-                        str(video_path), fourcc, VIDEO_FPS, (VIDEO_WIDTH, VIDEO_HEIGHT))
+                    ts_name = timestamp_folder_name()
+                    seq_dir = output_dir / ts_name
+                    seq_dir.mkdir(parents=True, exist_ok=True)
                     trigger_type = "API" if api_triggered_recording else "MOTION"
-                    print(f"Started video recording: {video_path} (triggered by: {trigger_type})")
+                    if RECORDING_INPUT_TYPE == 'image_sequence':
+                        video_path = None
+                        video_writer = None
+                        print(f"Started image sequence recording: {seq_dir} (triggered by: {trigger_type})")
+                    else:
+                        video_path = seq_dir / "vid.mp4"
+                        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                        video_writer = cv2.VideoWriter(
+                            str(video_path), fourcc, VIDEO_FPS, (VIDEO_WIDTH, VIDEO_HEIGHT))
+                        print(f"Started video recording: {video_path} (triggered by: {trigger_type})")
 
                 # Stop sequence
                 if not should_record and recording:
@@ -1267,23 +1390,39 @@ def main():
                     if video_writer is not None:
                         video_writer.release()
                         video_writer = None
-                    print(f"Stopped recording. Saved {img_index} frames to {video_path}")
-                    if api_triggered_recording and video_path is not None:
-                        threading.Thread(target=upload_video,
-                                         args=(video_path,), daemon=True).start()
+                    print(f"Stopped recording. Saved {img_index} frames.")
+                    if api_triggered_recording:
+                        if RECORDING_INPUT_TYPE == 'image_sequence':
+                            frames_snapshot = list(image_frame_paths)
+                            seq_name = seq_dir.name if seq_dir else ts_name
+                            threading.Thread(target=upload_and_analyse_images,
+                                             args=(frames_snapshot, seq_name), daemon=True).start()
+                        elif video_path is not None:
+                            threading.Thread(target=upload_video,
+                                             args=(video_path,), daemon=True).start()
                     api_triggered_recording = False
                     video_path = None
+                    image_frame_paths = []
                     with control_lock:
                         if manual_record_command == "stop":
                             manual_record_command = None
 
-                # Capture frame to video
-                if recording and video_writer is not None:
-                    if (now - last_video_frame_time) >= VIDEO_FRAME_INTERVAL:
-                        video_frame = cv2.resize(frame, (VIDEO_WIDTH, VIDEO_HEIGHT))
-                        video_writer.write(video_frame)
-                        img_index += 1
-                        last_video_frame_time = now
+                # Capture frame
+                if recording:
+                    if RECORDING_INPUT_TYPE == 'image_sequence':
+                        if (now - last_video_frame_time) >= VIDEO_FRAME_INTERVAL:
+                            small = cv2.resize(frame, (VIDEO_WIDTH, VIDEO_HEIGHT))
+                            frame_path = seq_dir / f"frame_{img_index:04d}.jpg"
+                            cv2.imwrite(str(frame_path), small, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+                            image_frame_paths.append(str(frame_path))
+                            img_index += 1
+                            last_video_frame_time = now
+                    elif video_writer is not None:
+                        if (now - last_video_frame_time) >= VIDEO_FRAME_INTERVAL:
+                            video_frame = cv2.resize(frame, (VIDEO_WIDTH, VIDEO_HEIGHT))
+                            video_writer.write(video_frame)
+                            img_index += 1
+                            last_video_frame_time = now
 
                 # Update shared status
                 time_remaining = None
