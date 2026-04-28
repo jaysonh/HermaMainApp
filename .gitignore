@@ -1,5 +1,9 @@
 tmp/
 reference/
 recorded/
-
+herma/__pycache__/
+herma/web/__pycache__/
+__pycach__/
+*.pyc
+*.md
 

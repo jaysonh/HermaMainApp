@@ -1,8 +1,4 @@
-"""GLSL shader sources for the Herma webcam shader.
-
-Extracted from herma_webcam_shader.py to keep the main module focused on
-application logic.
-"""
+"""GLSL shader sources for the Herma webcam shader."""
 
 # ─── Vertex Shader ──────────────────────────────────────────────────────────
 
