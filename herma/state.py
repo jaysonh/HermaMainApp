@@ -90,6 +90,8 @@ API_KEY = os.environ.get("MONITOR_API_KEY", "jayson")
 AWS_UPLOAD_URL = os.environ.get("AWS_UPLOAD_URL", "http://10.142.77.6:5009/api/upload")
 AWS_UPLOAD_KEY = os.environ.get("AWS_UPLOAD_KEY", "jayson")
 END_VIDEO_PATH = config.END_VIDEO_PATH  # overridden from config.toml in main()
+# Overridden from config.toml [recording].timeout_seconds in main().
+RECORDING_TIMEOUT = config.RECORDING_TIMEOUT_DEFAULT
 
 
 # ─── State Mutations ────────────────────────────────────────────────────────

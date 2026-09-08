@@ -56,6 +56,23 @@ def _resolve_cam_idx(cfg, args):
     return cam_idx
 
 
+def _resolve_recording_timeout(cfg):
+    """How long the capture window stays open, from [recording].timeout_seconds."""
+    raw = config._deep_get(cfg, "recording", "timeout_seconds",
+                           default=config.RECORDING_TIMEOUT_DEFAULT)
+    try:
+        timeout = float(raw)
+    except (TypeError, ValueError):
+        print(f"Bad [recording].timeout_seconds {raw!r}; "
+              f"using {config.RECORDING_TIMEOUT_DEFAULT}s")
+        return config.RECORDING_TIMEOUT_DEFAULT
+    if timeout <= 0:
+        print(f"[recording].timeout_seconds must be > 0 (got {timeout}); "
+              f"using {config.RECORDING_TIMEOUT_DEFAULT}s")
+        return config.RECORDING_TIMEOUT_DEFAULT
+    return timeout
+
+
 def main():
     script_dir = Path(__file__).resolve().parent
 
@@ -70,6 +87,8 @@ def main():
     end_video_path = config._deep_get(cfg, "sentences", "video_path",
                                        default=config.END_VIDEO_PATH)
     state.END_VIDEO_PATH = str(Path(str(end_video_path)).expanduser())
+
+    state.RECORDING_TIMEOUT = _resolve_recording_timeout(cfg)
 
     state.AWS_UPLOAD_URL = os.environ.get(
         "AWS_UPLOAD_URL",
@@ -87,7 +106,7 @@ def main():
 
     threading.Thread(target=run_web_server, daemon=True).start()
     print(f"Web server: http://{config.WEB_HOST}:{config.WEB_PORT}/")
-    print(f"Capture timeout: {config.RECORDING_TIMEOUT}s")
+    print(f"Capture timeout: {state.RECORDING_TIMEOUT}s")
 
     try:
         render_loop.run(win, cap, frame, cam_w, cam_h, machine)

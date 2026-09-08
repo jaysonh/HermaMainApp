@@ -37,7 +37,7 @@ def index():
     return f"""<!doctype html><html><head><title>Herma Monitor</title>
 <style>body{{font-family:system-ui;margin:24px}}img{{max-width:100%}}</style></head>
 <body><h2>Herma Webcam Stream</h2>
-<p>Capture timeout: {config.RECORDING_TIMEOUT}s</p>
+<p>Capture timeout: {state.RECORDING_TIMEOUT}s</p>
 <img src="/stream"/></body></html>"""
 
 
@@ -58,9 +58,9 @@ def api_start():
     with state.chat_lock:
         state.show_chat = False
         state.chat_messages = []
-    print(f"API: Capture window open (auto-capture in {config.RECORDING_TIMEOUT}s)")
+    print(f"API: Capture window open (auto-capture in {state.RECORDING_TIMEOUT}s)")
     return jsonify({"status": "ok", "action": "start_recording",
-                    "timeout_seconds": config.RECORDING_TIMEOUT,
+                    "timeout_seconds": state.RECORDING_TIMEOUT,
                     "output_dir": str(config.OUTPUT_DIR_API)})
 
 
@@ -127,7 +127,7 @@ def api_status():
             mode = "auto"
         time_remaining = None
         if state.recording_start_time is not None and state.manual_record_command == "start":
-            time_remaining = max(0, config.RECORDING_TIMEOUT - (time.time() - state.recording_start_time))
+            time_remaining = max(0, state.RECORDING_TIMEOUT - (time.time() - state.recording_start_time))
         with state.intro_lock, state.organism_lock, state.chat_lock, state.sentences_lock:
             status = {
                 **state.current_status,

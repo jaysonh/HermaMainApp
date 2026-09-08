@@ -44,7 +44,9 @@ MOTION_THRESHOLD = 25
 MIN_MOTION_AREA = 2500
 
 # How long the capture window stays open before the still is taken anyway.
-RECORDING_TIMEOUT = 30.0
+# Default only — overridden from config.toml [recording].timeout_seconds; read
+# it as state.RECORDING_TIMEOUT, never from here.
+RECORDING_TIMEOUT_DEFAULT = 30.0
 
 DOWNSCALE_WIDTH = 1920
 OUTPUT_DIR_API = Path("recorded")

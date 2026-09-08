@@ -139,8 +139,8 @@ class RecordingMachine:
 
         # Timeout
         if cmd == "start" and rec_start is not None:
-            if (now - rec_start) >= config.RECORDING_TIMEOUT:
-                print(f"Recording timeout after {config.RECORDING_TIMEOUT}s")
+            if (now - rec_start) >= state.RECORDING_TIMEOUT:
+                print(f"Recording timeout after {state.RECORDING_TIMEOUT}s")
                 with state.control_lock:
                     state.manual_record_command = "stop"
                     state.recording_start_time = None
@@ -224,7 +224,7 @@ class RecordingMachine:
     def _update_status(self, now):
         time_remaining = None
         if self._rec_start is not None and self._cmd == "start":
-            time_remaining = max(0, config.RECORDING_TIMEOUT - (now - self._rec_start))
+            time_remaining = max(0, state.RECORDING_TIMEOUT - (now - self._rec_start))
 
         with state.control_lock:
             state.current_status = {
