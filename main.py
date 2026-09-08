@@ -69,7 +69,7 @@ def main():
 
     end_video_path = config._deep_get(cfg, "sentences", "video_path",
                                        default=config.END_VIDEO_PATH)
-    state.END_VIDEO_PATH = str(end_video_path)
+    state.END_VIDEO_PATH = str(Path(str(end_video_path)).expanduser())
 
     state.AWS_UPLOAD_URL = os.environ.get(
         "AWS_UPLOAD_URL",

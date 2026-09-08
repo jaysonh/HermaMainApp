@@ -19,7 +19,9 @@ class BackgroundVideo:
     """
 
     def __init__(self, path):
-        self.path = Path(path)
+        # expanduser so a config.toml can use "~/herma-assets/clip.mp4" — the
+        # shell isn't involved in reading that value, so nothing else expands it.
+        self.path = Path(path).expanduser()
         self.cap = None
         self.fps = 30.0
         self._next_due = 0.0

@@ -202,11 +202,11 @@ def _setup_gl_resources(win, frame, cam_w, cam_h):
     glBindBuffer(GL_ARRAY_BUFFER, gl.overlay_vbo)
     glBufferData(GL_ARRAY_BUFFER, overlay_quad.nbytes, overlay_quad, GL_STATIC_DRAW)
 
-    # Instructions overlay (pre-rendered, static)
+    # Instructions overlay (typed out on entry — see the render loop)
     gl.overlay_tex = _make_texture()
-    instructions_img = overlays.render_overlay_text(config.ONBOARDING_TEXT, 1920, 1080)
+    blank_overlay = np.zeros((1080, 1920, 4), dtype=np.uint8)
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1920, 1080, 0,
-                 GL_RGBA, GL_UNSIGNED_BYTE, instructions_img)
+                 GL_RGBA, GL_UNSIGNED_BYTE, blank_overlay)
 
     # Organism overlay (re-rendered when text changes)
     gl.organism_text_tex = _make_texture()
@@ -417,7 +417,9 @@ def run(win, cap, frame, cam_w, cam_h, recording_machine):
     _install_callbacks(win, ctx)
 
     end_video = video.BackgroundVideo(state.END_VIDEO_PATH)
-    page_renderer = None      # overlays.SentencesPageRenderer while a page is up
+    page_renderer = None          # overlays.TypewriterPage while a page is up
+    instructions_renderer = None  # ditto, for the instructions screen
+    instructions_start = None     # when the instructions typing began
 
     glEnable(GL_DEPTH_TEST)
     t0 = time.time()
@@ -455,6 +457,8 @@ def run(win, cap, frame, cam_w, cam_h, recording_machine):
             _clear_webcam_texture(gl)
             end_video.stop()
             page_renderer = None
+            instructions_renderer = None
+            instructions_start = None
             continue
 
         # ── Background video follows the sentences sequence ──
@@ -475,7 +479,7 @@ def run(win, cap, frame, cam_w, cam_h, recording_machine):
         page_visible = bool(page_text) and page_start is not None
         if page_visible:
             if page_renderer is None or page_renderer.text != page_text:
-                page_renderer = overlays.SentencesPageRenderer(page_text, 1920, 1080)
+                page_renderer = overlays.TypewriterPage(page_text, 1920, 1080)
             typed = (time.monotonic() - page_start) * page_cps
             if page_renderer.set_visible(typed):
                 glBindTexture(GL_TEXTURE_2D, gl.sentences_tex)
@@ -483,6 +487,22 @@ def run(win, cap, frame, cam_w, cam_h, recording_machine):
                              GL_RGBA, GL_UNSIGNED_BYTE, page_renderer.frame())
         else:
             page_renderer = None
+
+        # ── Type out the instructions screen ──
+        if current_intro_state == "instructions":
+            if instructions_renderer is None:
+                instructions_renderer = overlays.TypewriterPage(
+                    config.ONBOARDING_TEXT, 1920, 1080,
+                    align="center", font_size=64, line_height=90, margin_x=80)
+                instructions_start = time.monotonic()
+            typed = (time.monotonic() - instructions_start) * config.INSTRUCTIONS_CPS
+            if instructions_renderer.set_visible(typed):
+                glBindTexture(GL_TEXTURE_2D, gl.overlay_tex)
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1920, 1080, 0,
+                             GL_RGBA, GL_UNSIGNED_BYTE, instructions_renderer.frame())
+        else:
+            instructions_renderer = None
+            instructions_start = None
 
         # ── Hide stale webcam frame while overlays show ──
         if current_show_chat or current_show_organism:

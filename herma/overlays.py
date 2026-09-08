@@ -62,57 +62,6 @@ def render_hud_text(mode_str, rec_state, img_index, time_remaining, has_motion):
     return img
 
 
-def render_overlay_text(text, width, height):
-    """Render multi-line text centred on a semi-transparent background with word wrapping."""
-    pil_img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(pil_img)
-    font = _load_font(64, config.OVERLAY_FONT_PATH)
-
-    margin = 80
-    max_text_width = width - margin * 2
-    line_height = 90
-
-    wrapped_lines = []
-    for paragraph in text.strip().split('\n'):
-        if not paragraph.strip():
-            wrapped_lines.append("")
-            continue
-        words = paragraph.split()
-        current_line = ""
-        for word in words:
-            test_line = current_line + " " + word if current_line else word
-            bbox = draw.textbbox((0, 0), test_line, font=font)
-            if bbox[2] - bbox[0] <= max_text_width:
-                current_line = test_line
-            else:
-                if current_line:
-                    wrapped_lines.append(current_line)
-                current_line = word
-        if current_line:
-            wrapped_lines.append(current_line)
-
-    total_height = len(wrapped_lines) * line_height
-    y_start = (height - total_height) // 2
-
-    pad = 30
-    bg_x0 = margin - pad
-    bg_y0 = y_start - pad
-    bg_x1 = width - margin + pad
-    bg_y1 = y_start + total_height + pad
-    draw.rectangle([bg_x0, bg_y0, bg_x1, bg_y1], fill=(128, 128, 128, 160))
-
-    for i, line in enumerate(wrapped_lines):
-        bbox = draw.textbbox((0, 0), line, font=font)
-        text_w = bbox[2] - bbox[0]
-        x = (width - text_w) // 2
-        y = y_start + i * line_height
-        _draw_outlined_text(draw, (x, y), line, font)
-
-    img = np.array(pil_img, dtype=np.uint8)
-    img = cv2.flip(img, 0)
-    return img
-
-
 def render_organism_overlay(text, width, height):
     """Render organism name + description with a grey translucent panel sized to fit the text."""
     pil_img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
@@ -179,12 +128,10 @@ def render_organism_overlay(text, width, height):
     panel_h = content_h + panel_padding * 2
     panel_w = max_text_area_w + panel_padding * 2
 
+    # No panel is drawn any more — the white outline carries the text over
+    # whatever is behind it — but its box still positions the block.
     panel_x = (width - panel_w) // 2
     panel_y = (height - panel_h) // 2
-
-    draw.rectangle(
-        [(panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h)],
-        fill=(30, 30, 30, 200))
 
     text_x = panel_x + panel_padding
     text_y = panel_y + panel_padding
@@ -215,29 +162,32 @@ _page_layout_cache = {}
 _PAGE_SIZES = (64, 56, 48, 44, 40, 36, 32, 28, 24, 20, 18)
 
 
-def _layout_sentences_page(draw, text, width, height):
-    """Wrap the whole page and pick the largest font size that still fits.
+def _layout_page(draw, text, width, height, align, font_size,
+                 line_height, margin_x, margin_y):
+    """Wrap a page of text and work out where every line goes.
 
-    Returns ``(font, lines, line_height, x_left, y_start)``. ``lines`` is every
-    wrapped line of the *complete* text, so the layout stays fixed while the
-    typewriter reveals it — nothing reflows mid-sentence.
+    With ``font_size=None`` the largest size that still fits vertically is
+    chosen. Returns ``(font, lines, line_height, xs, y_start)`` where ``xs`` is
+    the x position of each line — for centred text that is the *finished*
+    line's position, so a half-typed line doesn't drift as it fills in.
     """
-    key = (text, width, height)
+    key = (text, width, height, align, font_size, line_height, margin_x, margin_y)
     cached = _page_layout_cache.get(key)
     if cached is not None:
         return cached
 
-    margin_x = width // 10
-    margin_y = height // 12
+    margin_x = width // 10 if margin_x is None else margin_x
+    margin_y = height // 12 if margin_y is None else margin_y
     max_w = width - margin_x * 2
     max_h = height - margin_y * 2
+    sizes = (font_size,) if font_size else _PAGE_SIZES
 
     font = None
     lines = []
-    line_height = 0
-    for size in _PAGE_SIZES:
+    lh = 0
+    for size in sizes:
         font = _load_font(size, config.OVERLAY_FONT_PATH)
-        line_height = round(size * 1.5)
+        lh = round(size * 1.5) if line_height is None else line_height
         lines = []
         for paragraph in text.split("\n"):
             paragraph = paragraph.strip()
@@ -256,19 +206,24 @@ def _layout_sentences_page(draw, text, width, height):
                     current = word
             if current:
                 lines.append(current)
-        if len(lines) * line_height <= max_h:
+        if len(lines) * lh <= max_h:
             break
 
-    y_start = (height - len(lines) * line_height) // 2
-    result = (font, lines, line_height, margin_x, y_start)
+    if align == "center":
+        xs = [(width - draw.textlength(line, font=font)) // 2 for line in lines]
+    else:
+        xs = [margin_x] * len(lines)
 
-    _page_layout_cache.clear()  # only ever one page on screen at a time
+    y_start = (height - len(lines) * lh) // 2
+    result = (font, lines, lh, xs, y_start)
+
+    _page_layout_cache.clear()  # at most a couple of pages exist at a time
     _page_layout_cache[key] = result
     return result
 
 
-class SentencesPageRenderer:
-    """Types a page of sentences out onto a persistent canvas.
+class TypewriterPage:
+    """Types a page of text out onto a persistent canvas.
 
     Redrawing all of the text every tick costs ~70ms — PIL rasterises the
     outline stroke separately for every call — which would drop the render loop
@@ -277,7 +232,8 @@ class SentencesPageRenderer:
     the newly revealed run of characters.
     """
 
-    def __init__(self, text, width, height):
+    def __init__(self, text, width, height, align="left", font_size=None,
+                 line_height=None, margin_x=None, margin_y=None):
         self.text = text
         self.width = width
         self.height = height
@@ -289,8 +245,9 @@ class SentencesPageRenderer:
         # 1920x1080 image costs ~11ms, so only changed rows are copied across.
         self._buf = np.zeros((height, width, 4), dtype=np.uint8)
         (self.font, self.lines, self.line_height,
-         self.x_left, self.y_start) = _layout_sentences_page(
-            self.draw, text, width, height)
+         self.xs, self.y_start) = _layout_page(
+            self.draw, text, width, height, align, font_size,
+            line_height, margin_x, margin_y)
 
         # Where each wrapped line starts in the character stream. The line break
         # itself counts as one character, matching sentences_page_total_chars.
@@ -326,7 +283,7 @@ class SentencesPageRenderer:
             now = max(0, min(visible_chars - start, len(line)))
             if now <= already:
                 continue
-            x = self.x_left
+            x = self.xs[i]
             if already:
                 x += self.draw.textlength(line[:already], font=self.font)
             line_y = self.y_start + i * self.line_height

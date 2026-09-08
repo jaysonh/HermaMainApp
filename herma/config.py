@@ -103,6 +103,9 @@ END_VIDEO_PATH = str(PROJECT_ROOT.parent / "PlatesBlackButtons" / "Screen" / "Bl
 # How long the finished page stays up before the thank-you message.
 SENTENCES_PAGE_HOLD = 8.0
 
+# Typing speed of the instructions screen, in characters per second.
+INSTRUCTIONS_CPS = 25.0
+
 
 # ─── TOML Loading ───────────────────────────────────────────────────────────
 
