@@ -86,6 +86,10 @@ ORGANISM_TEXT = ""
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ASSETS_DIR = PROJECT_ROOT / "assets"
 FONT_PATH = str(ASSETS_DIR / "sylfaen.ttf")
+# Every on-screen overlay — instructions, organism (sentences, thank-you
+# message, organism name + description) and chat bubbles — uses Cascadia Code.
+# Only the HUD status bar still uses FONT_PATH.
+OVERLAY_FONT_PATH = str(ASSETS_DIR / "CascadiaCode-Regular.ttf")
 LOGO_PATH = ASSETS_DIR / "LogoV2.png"
 
 

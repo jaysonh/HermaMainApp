@@ -13,11 +13,12 @@ from PIL import Image, ImageDraw, ImageFont
 from . import config
 
 
-def _load_font(size):
+def _load_font(size, path=None):
+    path = path or config.FONT_PATH
     try:
-        return ImageFont.truetype(config.FONT_PATH, size)
+        return ImageFont.truetype(path, size)
     except (IOError, OSError):
-        print(f"Warning: Could not load {config.FONT_PATH}, falling back to default font")
+        print(f"Warning: Could not load {path}, falling back to default font")
         return ImageFont.load_default()
 
 
@@ -50,7 +51,7 @@ def render_overlay_text(text, width, height):
     """Render multi-line text centred on a semi-transparent background with word wrapping."""
     pil_img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(pil_img)
-    font = _load_font(64)
+    font = _load_font(64, config.OVERLAY_FONT_PATH)
 
     margin = 80
     max_text_width = width - margin * 2
@@ -102,8 +103,8 @@ def render_organism_overlay(text, width, height):
     pil_img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(pil_img)
 
-    title_font = _load_font(44)
-    body_font = _load_font(26)
+    title_font = _load_font(44, config.OVERLAY_FONT_PATH)
+    body_font = _load_font(26, config.OVERLAY_FONT_PATH)
 
     dots = _animated_dots()
     text = text.replace("Loading organism", f"Loading organism{dots}")
@@ -193,7 +194,7 @@ def render_chat_messages(messages, width, height):
     """Render chat messages in bubble style — organism on left, user on right."""
     pil_img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(pil_img)
-    font = _load_font(22)
+    font = _load_font(22, config.OVERLAY_FONT_PATH)
 
     if not messages:
         return np.array(pil_img, dtype=np.uint8)
