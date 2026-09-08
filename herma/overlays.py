@@ -22,7 +22,7 @@ def _load_font(size, path=None):
         return ImageFont.load_default()
 
 
-def _draw_outlined_text(draw, xy, text, font, anchor=None):
+def _draw_outlined_text(draw, xy, text, font, anchor=None, stroke_width=None):
     """Draw black text with a white outline — the look shared by every Cascadia overlay.
 
     The stroke is scaled off the font size so it stays proportional from the
@@ -31,7 +31,8 @@ def _draw_outlined_text(draw, xy, text, font, anchor=None):
     draw.text(
         xy, text, font=font,
         fill=config.TEXT_FILL,
-        stroke_width=max(1, round(font.size / 20)),
+        stroke_width=(max(1, round(font.size / 20)) if stroke_width is None
+                      else stroke_width),
         stroke_fill=config.TEXT_OUTLINE,
         anchor=anchor,
     )
@@ -105,8 +106,10 @@ def _render_loading_overlay(draw, width, height):
     x = (width - full_w) / 2
     y = (height - (bbox[3] + bbox[1])) / 2
 
-    _draw_outlined_text(draw, (x, y), base, font)
-    _draw_outlined_text(draw, (x + base_w, y), _animated_dots(), font)
+    stroke = config.LOADING_OUTLINE_WIDTH
+    _draw_outlined_text(draw, (x, y), base, font, stroke_width=stroke)
+    _draw_outlined_text(draw, (x + base_w, y), _animated_dots(), font,
+                        stroke_width=stroke)
 
 
 def render_organism_overlay(text, width, height):

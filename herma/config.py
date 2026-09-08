@@ -85,6 +85,9 @@ ORGANISM_TEXT = ""
 # sized to nearly fill the screen width — see overlays.render_organism_overlay.
 LOADING_TEXT = "LOADING ORGANISM"
 LOADING_WIDTH_FRACTION = 0.88
+# Outline width in pixels for that one screen. The shared rule scales the
+# stroke with the font size, which is far too heavy at ~150px.
+LOADING_OUTLINE_WIDTH = 3
 
 # ─── Asset Paths ────────────────────────────────────────────────────────────
 
