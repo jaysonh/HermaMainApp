@@ -447,7 +447,8 @@ def run(win, cap, frame, cam_w, cam_h, recording_machine):
             current_organism_text = state.organism_overlay_text
             state.organism_text_dirty = False
 
-        page_text, page_start, page_cps, show_end_video = state.get_sentences_page()
+        (page_text, page_start, page_cps, page_align,
+         show_end_video) = state.get_sentences_page()
 
         # ── Restart ──
         if state.consume_restart_request():
@@ -468,7 +469,8 @@ def run(win, cap, frame, cam_w, cam_h, recording_machine):
             end_video.stop()
 
         # ── Re-render organism text when needed (also every frame while loading, to animate dots) ──
-        organism_is_loading = current_show_organism and "LOADING" in current_organism_text
+        organism_is_loading = (current_show_organism
+                               and current_organism_text.strip() == config.LOADING_TEXT)
         if current_organism_text_dirty or organism_is_loading:
             organism_text_img = overlays.render_organism_overlay(current_organism_text, 1920, 1080)
             glBindTexture(GL_TEXTURE_2D, gl.organism_text_tex)
@@ -478,8 +480,10 @@ def run(win, cap, frame, cam_w, cam_h, recording_machine):
         # ── Type out the sentences page ──
         page_visible = bool(page_text) and page_start is not None
         if page_visible:
-            if page_renderer is None or page_renderer.text != page_text:
-                page_renderer = overlays.TypewriterPage(page_text, 1920, 1080)
+            if (page_renderer is None or page_renderer.text != page_text
+                    or page_renderer.align != page_align):
+                page_renderer = overlays.TypewriterPage(page_text, 1920, 1080,
+                                                        align=page_align)
             typed = (time.monotonic() - page_start) * page_cps
             if page_renderer.set_visible(typed):
                 glBindTexture(GL_TEXTURE_2D, gl.sentences_tex)

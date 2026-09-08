@@ -62,16 +62,64 @@ def render_hud_text(mode_str, rec_state, img_index, time_remaining, has_motion):
     return img
 
 
+# Font size for the loading screen depends only on the text and the screen
+# width, but the overlay is re-rendered every frame to animate the dots — so it
+# is worked out once and kept.
+_loading_font_cache = {}
+
+
+def _fit_font_to_width(text, target_w, draw):
+    """Largest font size whose rendered ``text`` still fits ``target_w``."""
+    size = 24
+    best = size
+    while size <= 400:
+        font = _load_font(size, config.OVERLAY_FONT_PATH)
+        if draw.textlength(text, font=font) > target_w:
+            break
+        best = size
+        size += 4
+    return best
+
+
+def _render_loading_overlay(draw, width, height):
+    """Draw the loading message big and centred, animated dots trailing it.
+
+    The size is fitted to the message *plus* three dots, and the whole block is
+    centred on that width, so the dots always fit on screen and the message
+    holds still instead of shuffling as they cycle.
+    """
+    base = config.LOADING_TEXT
+    key = (base, width)
+    cached = _loading_font_cache.get(key)
+    if cached is None:
+        target_w = width * config.LOADING_WIDTH_FRACTION
+        font = _load_font(_fit_font_to_width(base + "...", target_w, draw),
+                          config.OVERLAY_FONT_PATH)
+        base_w = draw.textlength(base, font=font)
+        full_w = draw.textlength(base + "...", font=font)
+        _loading_font_cache.clear()
+        _loading_font_cache[key] = cached = (font, base_w, full_w)
+    font, base_w, full_w = cached
+
+    bbox = draw.textbbox((0, 0), base, font=font)
+    x = (width - full_w) / 2
+    y = (height - (bbox[3] + bbox[1])) / 2
+
+    _draw_outlined_text(draw, (x, y), base, font)
+    _draw_outlined_text(draw, (x + base_w, y), _animated_dots(), font)
+
+
 def render_organism_overlay(text, width, height):
     """Render organism name + description with a grey translucent panel sized to fit the text."""
     pil_img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(pil_img)
 
+    if text.strip() == config.LOADING_TEXT:
+        _render_loading_overlay(draw, width, height)
+        return cv2.flip(np.array(pil_img, dtype=np.uint8), 0)
+
     title_font = _load_font(44, config.OVERLAY_FONT_PATH)
     body_font = _load_font(26, config.OVERLAY_FONT_PATH)
-
-    dots = _animated_dots()
-    text = text.replace("LOADING ORGANISM", f"LOADING ORGANISM{dots}")
 
     panel_padding = 30
     line_height = 38
@@ -237,6 +285,7 @@ class TypewriterPage:
         self.text = text
         self.width = width
         self.height = height
+        self.align = align
         self.total_chars = sentences_page_total_chars(text)
 
         self.img = Image.new("RGBA", (width, height), (0, 0, 0, 0))

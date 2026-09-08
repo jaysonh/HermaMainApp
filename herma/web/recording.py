@@ -70,7 +70,7 @@ def api_stop():
         state.show_organism = True
     with state.chat_lock:
         state.show_chat = False
-    state.set_organism_text("Loading")
+    state.set_organism_text(config.LOADING_TEXT)
     print("API: Stop recording requested - waiting for sentences")
     return jsonify({"status": "ok", "action": "stop_recording", "waiting_for_sentences": True})
 

@@ -81,6 +81,11 @@ ONBOARDING_TEXT = (
 )
 ORGANISM_TEXT = ""
 
+# Shown from /api/stop until the analysis comes back. Drawn large and centred,
+# sized to nearly fill the screen width — see overlays.render_organism_overlay.
+LOADING_TEXT = "LOADING ORGANISM"
+LOADING_WIDTH_FRACTION = 0.88
+
 # ─── Asset Paths ────────────────────────────────────────────────────────────
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -102,6 +107,10 @@ END_VIDEO_PATH = str(PROJECT_ROOT.parent / "PlatesBlackButtons" / "Screen" / "Bl
 
 # How long the finished page stays up before the thank-you message.
 SENTENCES_PAGE_HOLD = 8.0
+
+# Typed out the same way as the sentences, once the page is done.
+THANK_YOU_TEXT = "Thank you for your experience"
+THANK_YOU_HOLD = 10.0
 
 # Typing speed of the instructions screen, in characters per second.
 INSTRUCTIONS_CPS = 25.0

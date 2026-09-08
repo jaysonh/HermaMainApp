@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 
 import requests
 
-from . import state
+from . import config, state
 
 
 def fetch_recording_mode() -> str:
@@ -53,7 +53,7 @@ def upload_video(video_path: Path):
             )
         if response.ok:
             print(f"Upload successful: {response.json()}")
-            state.set_organism_text("LOADING ORGANISM")
+            state.set_organism_text(config.LOADING_TEXT)
             analyse_video(video_path)
             return True
         print(f"Upload failed: {response.status_code} - {response.text}")
@@ -97,7 +97,7 @@ def upload_and_analyse_images(image_paths: list, seq_name: str):
     except requests.exceptions.RequestException as e:
         print(f"Image upload error: {e}")
 
-    state.set_organism_text("LOADING ORGANISM")
+    state.set_organism_text(config.LOADING_TEXT)
     analyse_images(image_paths)
 
 

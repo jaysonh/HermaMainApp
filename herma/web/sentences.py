@@ -58,9 +58,14 @@ def _sentences_worker(sentences, seconds_per_char):
             state.sentences_stop = False
 
         if not was_stopped:
-            state.set_organism_text("Thank you for your experience")
-            print("API: Showing thank-you message for 10s")
-            time.sleep(10)
+            thanks = config.THANK_YOU_TEXT
+            cps = _page_timings([thanks], seconds_per_char)[1]
+            state.start_sentences_page(thanks, cps, align="center")
+            typing = overlays.sentences_page_total_chars(thanks) / cps
+            print(f"API: Typing thank-you message ({typing:.1f}s "
+                  f"+{config.THANK_YOU_HOLD:.0f}s hold)")
+            time.sleep(typing + config.THANK_YOU_HOLD)
+            state.clear_sentences_page()
 
         try:
             parsed = urlparse(state.AWS_UPLOAD_URL)

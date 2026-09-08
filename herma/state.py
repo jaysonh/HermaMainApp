@@ -71,6 +71,7 @@ sentences_page_lock = threading.Lock()
 sentences_page_text = ""
 sentences_page_start = None   # time.monotonic() when typing began
 sentences_page_cps = 20.0     # characters per second
+sentences_page_align = "left"  # "left" for sentences, "center" for the thank-you
 
 # While the page (and the thank-you that follows it) is up, the terrain shader
 # is replaced by a looping background video.
@@ -105,11 +106,13 @@ def consume_restart_request() -> bool:
         return False
 
 
-def start_sentences_page(text, chars_per_second):
-    """Publish the full sentences page and start the typewriter clock."""
-    global sentences_page_text, sentences_page_start, sentences_page_cps, show_end_video
+def start_sentences_page(text, chars_per_second, align="left"):
+    """Publish a page of text and start the typewriter clock."""
+    global sentences_page_text, sentences_page_start, sentences_page_cps
+    global sentences_page_align, show_end_video
     with sentences_page_lock:
         sentences_page_text = text
+        sentences_page_align = align
         sentences_page_cps = max(1.0, float(chars_per_second))
         sentences_page_start = time.monotonic()
         show_end_video = True
@@ -124,10 +127,10 @@ def clear_sentences_page():
 
 
 def get_sentences_page():
-    """Return ``(text, start, chars_per_second, show_end_video)``."""
+    """Return ``(text, start, chars_per_second, align, show_end_video)``."""
     with sentences_page_lock:
         return (sentences_page_text, sentences_page_start,
-                sentences_page_cps, show_end_video)
+                sentences_page_cps, sentences_page_align, show_end_video)
 
 
 def set_organism_text(text):
