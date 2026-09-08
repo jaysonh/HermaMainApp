@@ -607,7 +607,8 @@ def run(win, cap, frame, cam_w, cam_h, recording_machine):
                 instructions_renderer = overlays.TypewriterPage(
                     config.ONBOARDING_TEXT, 1920, 1080,
                     align="center", margin_x=80,
-                    stroke_width=config.INSTRUCTIONS_OUTLINE_WIDTH)
+                    stroke_width=config.INSTRUCTIONS_OUTLINE_WIDTH,
+                    font_path=config.OVERLAY_FONT_BOLD_PATH)
                 instructions_start = time.monotonic()
             typed = (time.monotonic() - instructions_start) * config.INSTRUCTIONS_CPS
             if instructions_renderer.set_visible(typed):

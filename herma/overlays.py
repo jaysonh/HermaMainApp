@@ -224,7 +224,7 @@ def inset_rect(width, height, video_aspect=None):
 
 
 def _layout_page(draw, text, width, height, align, font_size,
-                 line_height, margin_x, margin_y, avoid, top):
+                 line_height, margin_x, margin_y, avoid, top, font_path):
     """Wrap a page of text and work out where every line goes.
 
     With ``font_size=None`` the largest size that still fits vertically is
@@ -236,7 +236,7 @@ def _layout_page(draw, text, width, height, align, font_size,
     position, so a half-typed line doesn't drift as it fills in.
     """
     key = (text, width, height, align, font_size, line_height, margin_x,
-           margin_y, avoid, top)
+           margin_y, avoid, top, font_path)
     cached = _page_layout_cache.get(key)
     if cached is not None:
         return cached
@@ -264,7 +264,7 @@ def _layout_page(draw, text, width, height, align, font_size,
     lines = []
     lh = 0
     for size in sizes:
-        font = _load_font(size, config.OVERLAY_FONT_PATH)
+        font = _load_font(size, font_path)
         lh = round(size * 1.5) if line_height is None else line_height
         lines = []
         for paragraph in text.split("\n"):
@@ -317,7 +317,7 @@ class TypewriterPage:
 
     def __init__(self, text, width, height, align="left", font_size=None,
                  line_height=None, margin_x=None, margin_y=None, avoid=None,
-                 top=None, stroke_width=None):
+                 top=None, stroke_width=None, font_path=None):
         self.text = text
         self.width = width
         self.height = height
@@ -335,7 +335,8 @@ class TypewriterPage:
         (self.font, self.lines, self.line_height,
          self.xs, self.y_start) = _layout_page(
             self.draw, text, width, height, align, font_size,
-            line_height, margin_x, margin_y, avoid, top)
+            line_height, margin_x, margin_y, avoid, top,
+            font_path or config.OVERLAY_FONT_PATH)
 
         # Where each wrapped line starts in the character stream. The line break
         # itself counts as one character, matching sentences_page_total_chars.
