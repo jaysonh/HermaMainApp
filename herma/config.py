@@ -95,6 +95,14 @@ TEXT_FILL = (0, 0, 0, 255)
 TEXT_OUTLINE = (255, 255, 255, 255)
 LOGO_PATH = ASSETS_DIR / "LogoV2.png"
 
+# Played behind the sentences page instead of the terrain shader. Kept as a
+# path relative to the project root so it resolves on Windows (D:\herma\...)
+# and WSL (/mnt/d/herma/...) alike; override with [sentences].video_path.
+END_VIDEO_PATH = str(PROJECT_ROOT.parent / "PlatesBlackButtons" / "Screen" / "BlankEndVideo.mp4")
+
+# How long the finished page stays up before the thank-you message.
+SENTENCES_PAGE_HOLD = 8.0
+
 
 # ─── TOML Loading ───────────────────────────────────────────────────────────
 

@@ -11,6 +11,7 @@ the Flask blueprints do it.
 
 import os
 import threading
+import time
 
 from . import config
 
@@ -63,6 +64,18 @@ sentences_lock = threading.Lock()
 sentences_active = False
 sentences_stop = False
 
+# The whole set of sentences is shown as one page, typed out a character at a
+# time. The render loop derives how much is visible from the start time, so the
+# worker thread only has to publish the text once.
+sentences_page_lock = threading.Lock()
+sentences_page_text = ""
+sentences_page_start = None   # time.monotonic() when typing began
+sentences_page_cps = 20.0     # characters per second
+
+# While the page (and the thank-you that follows it) is up, the terrain shader
+# is replaced by a looping background video.
+show_end_video = False
+
 # ─── Runtime-mutable Config ─────────────────────────────────────────────────
 # These look like config but are mutated at startup (from TOML / env vars)
 # or at runtime (RECORDING_INPUT_TYPE), so they live here rather than in
@@ -72,6 +85,7 @@ API_KEY = os.environ.get("MONITOR_API_KEY", "jayson")
 AWS_UPLOAD_URL = os.environ.get("AWS_UPLOAD_URL", "http://10.142.77.6:5009/api/upload")
 AWS_UPLOAD_KEY = os.environ.get("AWS_UPLOAD_KEY", "jayson")
 RECORDING_INPUT_TYPE = "video"  # "video" or "image_sequence" — refreshed per-recording
+END_VIDEO_PATH = config.END_VIDEO_PATH  # overridden from config.toml in main()
 
 
 # ─── State Mutations ────────────────────────────────────────────────────────
@@ -91,6 +105,31 @@ def consume_restart_request() -> bool:
         return False
 
 
+def start_sentences_page(text, chars_per_second):
+    """Publish the full sentences page and start the typewriter clock."""
+    global sentences_page_text, sentences_page_start, sentences_page_cps, show_end_video
+    with sentences_page_lock:
+        sentences_page_text = text
+        sentences_page_cps = max(1.0, float(chars_per_second))
+        sentences_page_start = time.monotonic()
+        show_end_video = True
+
+
+def clear_sentences_page():
+    """Take the page down, leaving the background video running."""
+    global sentences_page_text, sentences_page_start
+    with sentences_page_lock:
+        sentences_page_text = ""
+        sentences_page_start = None
+
+
+def get_sentences_page():
+    """Return ``(text, start, chars_per_second, show_end_video)``."""
+    with sentences_page_lock:
+        return (sentences_page_text, sentences_page_start,
+                sentences_page_cps, show_end_video)
+
+
 def set_organism_text(text):
     """Update the organism overlay text from any thread."""
     global organism_overlay_text, organism_text_dirty
@@ -104,6 +143,7 @@ def reset_to_initial_state():
     global manual_record_command, recording_start_time, current_status
     global intro_state, show_organism, show_chat, chat_messages, latest_jpeg
     global organism_overlay_text, organism_text_dirty, sentences_stop
+    global sentences_page_text, sentences_page_start, show_end_video
 
     with control_lock:
         manual_record_command = None
@@ -130,6 +170,11 @@ def reset_to_initial_state():
 
     with sentences_lock:
         sentences_stop = True
+
+    with sentences_page_lock:
+        sentences_page_text = ""
+        sentences_page_start = None
+        show_end_video = False
 
     with jpeg_lock:
         latest_jpeg = None

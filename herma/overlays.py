@@ -122,7 +122,7 @@ def render_organism_overlay(text, width, height):
     body_font = _load_font(26, config.OVERLAY_FONT_PATH)
 
     dots = _animated_dots()
-    text = text.replace("Loading organism", f"Loading organism{dots}")
+    text = text.replace("LOADING ORGANISM", f"LOADING ORGANISM{dots}")
 
     panel_padding = 30
     line_height = 38
@@ -203,6 +203,155 @@ def render_organism_overlay(text, width, height):
     img = np.array(pil_img, dtype=np.uint8)
     img = cv2.flip(img, 0)
     return img
+
+
+# ─── Sentences page (typewriter) ────────────────────────────────────────────
+
+# Laying the page out means wrapping the text at up to ten candidate sizes, so
+# the result is cached — the render loop asks for a new frame ~20 times a second
+# and only the visible character count changes between them.
+_page_layout_cache = {}
+
+_PAGE_SIZES = (64, 56, 48, 44, 40, 36, 32, 28, 24, 20, 18)
+
+
+def _layout_sentences_page(draw, text, width, height):
+    """Wrap the whole page and pick the largest font size that still fits.
+
+    Returns ``(font, lines, line_height, x_left, y_start)``. ``lines`` is every
+    wrapped line of the *complete* text, so the layout stays fixed while the
+    typewriter reveals it — nothing reflows mid-sentence.
+    """
+    key = (text, width, height)
+    cached = _page_layout_cache.get(key)
+    if cached is not None:
+        return cached
+
+    margin_x = width // 10
+    margin_y = height // 12
+    max_w = width - margin_x * 2
+    max_h = height - margin_y * 2
+
+    font = None
+    lines = []
+    line_height = 0
+    for size in _PAGE_SIZES:
+        font = _load_font(size, config.OVERLAY_FONT_PATH)
+        line_height = round(size * 1.5)
+        lines = []
+        for paragraph in text.split("\n"):
+            paragraph = paragraph.strip()
+            if not paragraph:
+                lines.append("")
+                continue
+            current = ""
+            for word in paragraph.split():
+                test = current + " " + word if current else word
+                bbox = draw.textbbox((0, 0), test, font=font)
+                if bbox[2] - bbox[0] <= max_w:
+                    current = test
+                else:
+                    if current:
+                        lines.append(current)
+                    current = word
+            if current:
+                lines.append(current)
+        if len(lines) * line_height <= max_h:
+            break
+
+    y_start = (height - len(lines) * line_height) // 2
+    result = (font, lines, line_height, margin_x, y_start)
+
+    _page_layout_cache.clear()  # only ever one page on screen at a time
+    _page_layout_cache[key] = result
+    return result
+
+
+class SentencesPageRenderer:
+    """Types a page of sentences out onto a persistent canvas.
+
+    Redrawing all of the text every tick costs ~70ms — PIL rasterises the
+    outline stroke separately for every call — which would drop the render loop
+    below the background video's frame rate. The page only ever *gains*
+    characters, so the canvas is kept between frames and each update draws just
+    the newly revealed run of characters.
+    """
+
+    def __init__(self, text, width, height):
+        self.text = text
+        self.width = width
+        self.height = height
+        self.total_chars = sentences_page_total_chars(text)
+
+        self.img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        self.draw = ImageDraw.Draw(self.img)
+        # GL-ready mirror of the canvas, kept flipped. Converting the whole
+        # 1920x1080 image costs ~11ms, so only changed rows are copied across.
+        self._buf = np.zeros((height, width, 4), dtype=np.uint8)
+        (self.font, self.lines, self.line_height,
+         self.x_left, self.y_start) = _layout_sentences_page(
+            self.draw, text, width, height)
+
+        # Where each wrapped line starts in the character stream. The line break
+        # itself counts as one character, matching sentences_page_total_chars.
+        self.line_starts = []
+        cursor = 0
+        for line in self.lines:
+            self.line_starts.append(cursor)
+            cursor += len(line) + 1
+
+        self.drawn = 0
+
+    def set_visible(self, visible_chars):
+        """Draw any characters revealed since the last call.
+
+        Returns True if the canvas changed and needs re-uploading.
+        """
+        visible_chars = max(0, min(int(visible_chars), self.total_chars))
+        if visible_chars == self.drawn:
+            return False
+
+        if visible_chars < self.drawn:  # rewound — start the page over
+            self.img.paste((0, 0, 0, 0), (0, 0, self.width, self.height))
+            self._buf[:] = 0
+            self.drawn = 0
+
+        dirty_top = self.height
+        dirty_bottom = 0
+        for i, line in enumerate(self.lines):
+            if not line:
+                continue
+            start = self.line_starts[i]
+            already = max(0, min(self.drawn - start, len(line)))
+            now = max(0, min(visible_chars - start, len(line)))
+            if now <= already:
+                continue
+            x = self.x_left
+            if already:
+                x += self.draw.textlength(line[:already], font=self.font)
+            line_y = self.y_start + i * self.line_height
+            _draw_outlined_text(self.draw, (x, line_y), line[already:now], self.font)
+            dirty_top = min(dirty_top, line_y - self.line_height)
+            dirty_bottom = max(dirty_bottom, line_y + self.line_height * 2)
+
+        self.drawn = visible_chars
+        if dirty_bottom <= dirty_top:
+            return False
+
+        y0 = max(0, dirty_top)
+        y1 = min(self.height, dirty_bottom)
+        band = np.array(self.img.crop((0, y0, self.width, y1)), dtype=np.uint8)
+        self._buf[self.height - y1:self.height - y0] = band[::-1]
+        return True
+
+    def frame(self):
+        """The canvas as a GL-ready (flipped) uint8 RGBA array."""
+        return self._buf
+
+
+def sentences_page_total_chars(text):
+    """Characters the typewriter has to get through — matches the reveal above."""
+    return len(text) + text.count("\n")
 
 
 def render_chat_messages(messages, width, height):

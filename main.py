@@ -67,6 +67,10 @@ def main():
     herma_host = str(config._deep_get(cfg, "herma_server", "host", default="10.142.77.6"))
     herma_port = int(config._deep_get(cfg, "herma_server", "port", default=5009))
 
+    end_video_path = config._deep_get(cfg, "sentences", "video_path",
+                                       default=config.END_VIDEO_PATH)
+    state.END_VIDEO_PATH = str(end_video_path)
+
     state.AWS_UPLOAD_URL = os.environ.get(
         "AWS_UPLOAD_URL",
         f"http://{herma_host}:{herma_port}/api/upload",
@@ -76,6 +80,7 @@ def main():
     print(f"Camera index: {cam_idx}")
     print(f"Herma server: {herma_host}:{herma_port}")
     print(f"Upload URL: {state.AWS_UPLOAD_URL}")
+    print(f"Sentences background video: {state.END_VIDEO_PATH}")
 
     win, cap, frame, cam_w, cam_h = render_loop.bootstrap(display_cfg, cam_idx)
     machine = recording.RecordingMachine()

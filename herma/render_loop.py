@@ -33,7 +33,7 @@ from OpenGL.GL import (
     glViewport,
 )
 
-from . import config, gl_utils, overlays, state
+from . import config, gl_utils, overlays, state, video
 from shaders import VERT_SRC, FRAG_SRC, HUD_VERT_SRC, HUD_FRAG_SRC
 
 
@@ -214,6 +214,17 @@ def _setup_gl_resources(win, frame, cam_w, cam_h):
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1920, 1080, 0,
                  GL_RGBA, GL_UNSIGNED_BYTE, organism_text_img)
 
+    # Sentences page (re-rendered as the typewriter reveals more characters)
+    gl.sentences_tex = _make_texture()
+    blank_page = np.zeros((1080, 1920, 4), dtype=np.uint8)
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1920, 1080, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, blank_page)
+
+    # Background video shown instead of the terrain while the page is up
+    gl.video_tex = _make_texture()
+    gl.video_w = 0
+    gl.video_h = 0
+
     # Chat overlay (re-rendered every frame while visible)
     gl.chat_text_tex = _make_texture()
     blank_chat = np.zeros((1080, 1920, 4), dtype=np.uint8)
@@ -284,6 +295,19 @@ def _clear_webcam_texture(gl):
     glBindTexture(GL_TEXTURE_2D, gl.tex)
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, gl.cam_w, gl.cam_h, 0,
                  GL_RGB, GL_UNSIGNED_BYTE, black)
+
+
+def _upload_video_texture(gl, frame):
+    """Upload a background-video frame, reallocating if its size changed."""
+    fh, fw = frame.shape[:2]
+    glBindTexture(GL_TEXTURE_2D, gl.video_tex)
+    if (fw, fh) != (gl.video_w, gl.video_h):
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, fw, fh, 0,
+                     GL_RGB, GL_UNSIGNED_BYTE, frame)
+        gl.video_w, gl.video_h = fw, fh
+    else:
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, fw, fh,
+                        GL_RGB, GL_UNSIGNED_BYTE, frame)
 
 
 def _render_terrain(gl, fb_w, fb_h, ctx, t0, webcam_visible):
@@ -392,6 +416,9 @@ def run(win, cap, frame, cam_w, cam_h, recording_machine):
     )
     _install_callbacks(win, ctx)
 
+    end_video = video.BackgroundVideo(state.END_VIDEO_PATH)
+    page_renderer = None      # overlays.SentencesPageRenderer while a page is up
+
     glEnable(GL_DEPTH_TEST)
     t0 = time.time()
     last_intro_state = None
@@ -418,21 +445,44 @@ def run(win, cap, frame, cam_w, cam_h, recording_machine):
             current_organism_text = state.organism_overlay_text
             state.organism_text_dirty = False
 
+        page_text, page_start, page_cps, show_end_video = state.get_sentences_page()
+
         # ── Restart ──
         if state.consume_restart_request():
             print("Restarting to initial state...")
             state.reset_to_initial_state()
             recording_machine.reset()
             _clear_webcam_texture(gl)
+            end_video.stop()
+            page_renderer = None
             continue
 
+        # ── Background video follows the sentences sequence ──
+        if show_end_video and not end_video.active:
+            end_video.start(time.time())
+        elif not show_end_video and end_video.active:
+            end_video.stop()
+
         # ── Re-render organism text when needed (also every frame while loading, to animate dots) ──
-        organism_is_loading = current_show_organism and "Loading" in current_organism_text
+        organism_is_loading = current_show_organism and "LOADING" in current_organism_text
         if current_organism_text_dirty or organism_is_loading:
             organism_text_img = overlays.render_organism_overlay(current_organism_text, 1920, 1080)
             glBindTexture(GL_TEXTURE_2D, gl.organism_text_tex)
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1920, 1080, 0,
                          GL_RGBA, GL_UNSIGNED_BYTE, organism_text_img)
+
+        # ── Type out the sentences page ──
+        page_visible = bool(page_text) and page_start is not None
+        if page_visible:
+            if page_renderer is None or page_renderer.text != page_text:
+                page_renderer = overlays.SentencesPageRenderer(page_text, 1920, 1080)
+            typed = (time.monotonic() - page_start) * page_cps
+            if page_renderer.set_visible(typed):
+                glBindTexture(GL_TEXTURE_2D, gl.sentences_tex)
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1920, 1080, 0,
+                             GL_RGBA, GL_UNSIGNED_BYTE, page_renderer.frame())
+        else:
+            page_renderer = None
 
         # ── Hide stale webcam frame while overlays show ──
         if current_show_chat or current_show_organism:
@@ -458,7 +508,19 @@ def run(win, cap, frame, cam_w, cam_h, recording_machine):
                           and not current_show_chat
                           and not current_show_organism)
 
-        _render_terrain(gl, fb_w, fb_h, ctx, t0, webcam_visible)
+        if show_end_video:
+            # Terrain shader hidden — the video (or black, if it failed to
+            # open) is the whole background.
+            glViewport(0, 0, fb_w, fb_h)
+            glClearColor(0.0, 0.0, 0.0, 1.0)
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+            video_frame = end_video.poll(time.time())
+            if video_frame is not None:
+                _upload_video_texture(gl, video_frame)
+            if gl.video_w:
+                _draw_textured_quad(gl, gl.video_tex, gl.overlay_vbo)
+        else:
+            _render_terrain(gl, fb_w, fb_h, ctx, t0, webcam_visible)
 
         # ── Intro overlays ──
         if current_intro_state == "logo" and gl.logo_tex is not None and gl.logo_vbo is not None:
@@ -466,8 +528,10 @@ def run(win, cap, frame, cam_w, cam_h, recording_machine):
         elif current_intro_state == "instructions":
             _draw_textured_quad(gl, gl.overlay_tex, gl.overlay_vbo)
 
-        # ── Organism overlay ──
-        if current_show_organism:
+        # ── Sentences page / organism overlay ──
+        if page_visible:
+            _draw_textured_quad(gl, gl.sentences_tex, gl.overlay_vbo)
+        elif current_show_organism:
             _draw_textured_quad(gl, gl.organism_text_tex, gl.overlay_vbo)
 
         # ── Chat overlay (re-rendered every frame to animate typing dots) ──

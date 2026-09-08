@@ -53,7 +53,7 @@ def upload_video(video_path: Path):
             )
         if response.ok:
             print(f"Upload successful: {response.json()}")
-            state.set_organism_text("Loading organism")
+            state.set_organism_text("LOADING ORGANISM")
             analyse_video(video_path)
             return True
         print(f"Upload failed: {response.status_code} - {response.text}")
@@ -97,7 +97,7 @@ def upload_and_analyse_images(image_paths: list, seq_name: str):
     except requests.exceptions.RequestException as e:
         print(f"Image upload error: {e}")
 
-    state.set_organism_text("Loading organism")
+    state.set_organism_text("LOADING ORGANISM")
     analyse_images(image_paths)
 
 
