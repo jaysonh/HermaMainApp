@@ -274,6 +274,10 @@ uniform float u_rect4Contrast;
 
 // Webcam & aspect
 uniform sampler2D u_webcamTex;
+// >0 when the shader is drawn as a standalone panel over other content: the
+// output fades out towards rect1's edge so it blends into what is behind it
+// instead of ending on the viewport's hard rectangle. 0 for the normal pass.
+uniform float u_panelFeather;
 uniform vec2 u_rect1Pos;
 uniform vec2 u_rect1Size;
 uniform float u_aspectRatio;
@@ -567,7 +571,15 @@ void main() {
     vec3 bgColor = vec3(0.03, 0.03, 0.05);
     color = mix(bgColor, color, max(terrainEdgeFade, maxEffectiveBlend));
 
-    gl_FragColor = vec4(color, 1.0);
+    float alpha = 1.0;
+    if (u_panelFeather > 0.0) {
+        // Signed distance to rect1's edge: negative inside, positive outside.
+        vec2 dEdge = abs(v_uv - u_rect1Pos) - u_rect1Size;
+        float edge = max(dEdge.x, dEdge.y);
+        alpha = 1.0 - smoothstep(-u_panelFeather, u_panelFeather * 0.3, edge);
+    }
+
+    gl_FragColor = vec4(color, alpha);
 }
 """
 

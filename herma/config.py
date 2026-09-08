@@ -111,6 +111,21 @@ END_VIDEO_PATH = str(PROJECT_ROOT.parent / "PlatesBlackButtons" / "Screen" / "Bl
 # How long the finished page stays up before the thank-you message.
 SENTENCES_PAGE_HOLD = 8.0
 
+# The recording plays in the top-right of the sentences page, with the text
+# laid out around it. Fractions of the 1920x1080 page; the height follows from
+# the recording's own aspect ratio.
+INSET_WIDTH_FRACTION = 0.44
+INSET_RIGHT_MARGIN_FRACTION = 0.04
+INSET_TOP_FRACTION = 0.05
+INSET_GUTTER = 40          # px of clear space between the text and the inset
+INSET_FALLBACK_ASPECT = 4 / 3
+# How far past rect1 the shader panel is framed, as a fraction of its size.
+# Room is needed outside rect1 for the edge to fade out in, so this is positive
+# again — the terrain that would show there is what the feather removes.
+INSET_SHADER_MARGIN = 0.05
+# Width of that fade, in uv units of the shader grid.
+INSET_SHADER_FEATHER = 0.05
+
 # Typed out the same way as the sentences, once the page is done.
 THANK_YOU_TEXT = "Thank you for your experience"
 THANK_YOU_HOLD = 10.0

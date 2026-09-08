@@ -18,12 +18,16 @@ class BackgroundVideo:
     otherwise, so the caller keeps re-using the texture it already uploaded.
     """
 
-    def __init__(self, path):
+    def __init__(self, path, default_fps=30.0):
         # expanduser so a config.toml can use "~/herma-assets/clip.mp4" — the
         # shell isn't involved in reading that value, so nothing else expands it.
+        # A path may also be a printf-style pattern for an image sequence.
         self.path = Path(path).expanduser()
         self.cap = None
-        self.fps = 30.0
+        self.is_sequence = "%" in self.path.name
+        self.default_fps = float(default_fps)
+        self.fps = self.default_fps
+        self.aspect = None   # width / height, known once the file is open
         self._next_due = 0.0
 
     @property
@@ -33,7 +37,7 @@ class BackgroundVideo:
     def start(self, now):
         if self.cap is not None:
             return True
-        if not self.path.exists():
+        if not self.is_sequence and not self.path.exists():
             print(f"Background video not found: {self.path}")
             return False
 
@@ -43,8 +47,18 @@ class BackgroundVideo:
             cap.release()
             return False
 
+        # An image sequence has no frame rate of its own — OpenCV invents one
+        # (25) rather than reporting 0 — and some containers report nonsense.
+        # Either way, use the rate the caller knows it was captured at so
+        # playback runs at real time instead of racing.
         fps = cap.get(cv2.CAP_PROP_FPS)
-        self.fps = fps if fps and fps > 1.0 else 30.0
+        if self.is_sequence or not fps or fps <= 1.0:
+            self.fps = self.default_fps
+        else:
+            self.fps = fps
+        w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+        h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+        self.aspect = (w / h) if w and h else None
         self.cap = cap
         self._next_due = now
         print(f"Background video playing: {self.path.name} ({self.fps:.0f} fps)")

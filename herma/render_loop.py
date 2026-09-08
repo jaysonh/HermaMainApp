@@ -23,11 +23,13 @@ from OpenGL.GL import (
     GL_LINEAR, GL_ONE_MINUS_SRC_ALPHA, GL_RGB, GL_RGBA, GL_SRC_ALPHA,
     GL_STATIC_DRAW, GL_TEXTURE0, GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
     GL_TEXTURE_MIN_FILTER, GL_TEXTURE_WRAP_S, GL_TEXTURE_WRAP_T,
-    GL_TRIANGLE_FAN, GL_TRIANGLES, GL_UNSIGNED_BYTE, GL_UNSIGNED_INT,
+    GL_SCISSOR_TEST, GL_TRIANGLE_FAN, GL_TRIANGLES, GL_UNSIGNED_BYTE,
+    GL_UNSIGNED_INT,
     glActiveTexture, glBindBuffer, glBindTexture, glBlendFunc, glBufferData,
     glClear, glClearColor, glDisable, glDisableVertexAttribArray, glDrawArrays,
     glDrawElements, glEnable, glEnableVertexAttribArray, glGenBuffers,
-    glGenTextures, glGetAttribLocation, glGetUniformLocation, glTexImage2D,
+    glGenTextures, glGetAttribLocation, glGetUniformLocation, glScissor,
+    glTexImage2D,
     glTexParameteri, glTexSubImage2D, glUniform1f, glUniform1i, glUniform2f,
     glUniform3f, glUniformMatrix4fv, glUseProgram, glVertexAttribPointer,
     glViewport,
@@ -106,7 +108,7 @@ _TERRAIN_UNIFORM_NAMES = [
     'u_rect4Pos', 'u_rect4Size', 'u_rect4Elevation', 'u_rect4Blend',
     'u_rect4Hue', 'u_rect4Sat', 'u_rect4Bright', 'u_rect4Contrast',
     'u_terrainHue', 'u_terrainSat', 'u_terrainBright', 'u_terrainContrast',
-    'u_webcamTex', 'u_aspectRatio',
+    'u_webcamTex', 'u_aspectRatio', 'u_panelFeather',
 ]
 
 
@@ -225,6 +227,9 @@ def _setup_gl_resources(win, frame, cam_w, cam_h):
     gl.video_w = 0
     gl.video_h = 0
 
+    # The recording is replayed through the shader (rect1) in the top-right of
+    # the sentences page, so it needs no texture or quad of its own.
+
     # Chat overlay (re-rendered every frame while visible)
     gl.chat_text_tex = _make_texture()
     blank_chat = np.zeros((1080, 1920, 4), dtype=np.uint8)
@@ -232,6 +237,46 @@ def _setup_gl_resources(win, frame, cam_w, cam_h):
                  GL_RGBA, GL_UNSIGNED_BYTE, blank_chat)
 
     return gl
+
+
+def _rect1_ortho(margin):
+    """Ortho bounds framed on the shader's rect1 — the panel the webcam is
+    composited into — expanded by ``margin`` (a fraction of its size) so its
+    melted edge is included.
+
+    make_grid maps uv to world as ``pos = (uv - 0.5) * 2`` on both axes, and the
+    shader treats rect1Size as a *half* size, so rect1 spans
+    ``rect1X ± rect1W`` in uv.
+    """
+    P = config.P
+    l = (P['rect1X'] - P['rect1W'] - 0.5) * 2.0
+    r = (P['rect1X'] + P['rect1W'] - 0.5) * 2.0
+    b = (P['rect1Y'] - P['rect1H'] - 0.5) * 2.0
+    t = (P['rect1Y'] + P['rect1H'] - 0.5) * 2.0
+    mx = (r - l) * margin
+    my = (t - b) * margin
+    return l - mx, r + mx, b - my, t + my
+
+
+def _shader_patch_viewport(rect, fb_w, fb_h, page_w=1920, page_h=1080):
+    """Framebuffer viewport for the shader panel that replaces the preview.
+
+    ``rect`` is the preview box in page pixels, expanded by the same margin as
+    ``_rect1_ortho`` so rect1 lands exactly on it. GL counts y from the bottom,
+    the page from the top.
+    """
+    x0, y0, x1, y1 = rect
+    pad_x = (x1 - x0) * config.INSET_SHADER_MARGIN
+    pad_y = (y1 - y0) * config.INSET_SHADER_MARGIN
+    x0, x1 = x0 - pad_x, x1 + pad_x
+    y0, y1 = y0 - pad_y, y1 + pad_y
+
+    sx, sy = fb_w / page_w, fb_h / page_h
+    vx = int(round(x0 * sx))
+    vw = int(round((x1 - x0) * sx))
+    vy = int(round(fb_h - y1 * sy))
+    vh = int(round((y1 - y0) * sy))
+    return vx, vy, max(vw, 1), max(vh, 1)
 
 
 def _make_texture():
@@ -297,32 +342,57 @@ def _clear_webcam_texture(gl):
                  GL_RGB, GL_UNSIGNED_BYTE, black)
 
 
-def _upload_video_texture(gl, frame):
-    """Upload a background-video frame, reallocating if its size changed."""
+def _upload_video_frame(tex, frame, size):
+    """Upload a video frame, reallocating if its size changed.
+
+    ``size`` is the (w, h) currently allocated; the new one is returned.
+    """
     fh, fw = frame.shape[:2]
-    glBindTexture(GL_TEXTURE_2D, gl.video_tex)
-    if (fw, fh) != (gl.video_w, gl.video_h):
+    glBindTexture(GL_TEXTURE_2D, tex)
+    if (fw, fh) != size:
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, fw, fh, 0,
                      GL_RGB, GL_UNSIGNED_BYTE, frame)
-        gl.video_w, gl.video_h = fw, fh
     else:
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, fw, fh,
                         GL_RGB, GL_UNSIGNED_BYTE, frame)
+    return fw, fh
 
 
-def _render_terrain(gl, fb_w, fb_h, ctx, t0, webcam_visible):
-    glViewport(0, 0, fb_w, fb_h)
-    glClearColor(0.03, 0.03, 0.05, 1.0)
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+def _render_terrain(gl, fb_w, fb_h, ctx, t0, webcam_visible, viewport=None,
+                    frame_rect1=False):
+    """Draw the terrain. With ``viewport`` it fills only that rectangle of the
+    framebuffer — used to put a patch of shader behind the recording preview —
+    and leaves the rest of the frame (the background video) alone."""
+    if viewport is None:
+        vx, vy, vw, vh = 0, 0, fb_w, fb_h
+        glViewport(vx, vy, vw, vh)
+        glClearColor(0.03, 0.03, 0.05, 1.0)
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+    else:
+        vx, vy, vw, vh = viewport
+        glViewport(vx, vy, vw, vh)
+        # Colour must survive (the background video is already drawn), but the
+        # heightfield still needs a clean depth buffer inside the patch.
+        glEnable(GL_SCISSOR_TEST)
+        glScissor(vx, vy, vw, vh)
+        glClear(GL_DEPTH_BUFFER_BIT)
+        glDisable(GL_SCISSOR_TEST)
 
     glUseProgram(gl.prog)
 
-    aspect = fb_w / max(fb_h, 1)
-    z = ctx.zoom
-    if aspect > 1:
-        ol, or_, ob, ot = -z * aspect, z * aspect, -z, z
+    if frame_rect1:
+        # Zoom onto rect1 so the panel fills the viewport and the wider terrain
+        # field stays off screen, and fade its edge into whatever is behind.
+        ol, or_, ob, ot = _rect1_ortho(config.INSET_SHADER_MARGIN)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
     else:
-        ol, or_, ob, ot = -z, z, -z / aspect, z / aspect
+        aspect = vw / max(vh, 1)
+        z = ctx.zoom
+        if aspect > 1:
+            ol, or_, ob, ot = -z * aspect, z * aspect, -z, z
+        else:
+            ol, or_, ob, ot = -z, z, -z / aspect, z / aspect
     mvp = gl_utils.make_ortho(ol, or_, ob, ot, -10.0, 10.0)
 
     P = config.P
@@ -344,6 +414,8 @@ def _render_terrain(gl, fb_w, fb_h, ctx, t0, webcam_visible):
     glUniform1f(u['u_ringCount'], P['ringCount'])
     glUniform3f(u['u_lightDir'], 0.3, 0.3, 0.9)
     glUniform1f(u['u_aspectRatio'], config.TARGET_ASPECT)
+    glUniform1f(u['u_panelFeather'],
+                config.INSET_SHADER_FEATHER if frame_rect1 else 0.0)
 
     for r in ('rect1', 'rect3', 'rect4'):
         glUniform2f(u[f'u_{r}Pos'], P[f'{r}X'], P[f'{r}Y'])
@@ -374,6 +446,9 @@ def _render_terrain(gl, fb_w, fb_h, ctx, t0, webcam_visible):
 
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gl.ebo)
     glDrawElements(GL_TRIANGLES, gl.num_indices, GL_UNSIGNED_INT, None)
+
+    if frame_rect1:
+        glDisable(GL_BLEND)
 
 
 def _draw_textured_quad(gl, tex, vbo):
@@ -418,6 +493,7 @@ def run(win, cap, frame, cam_w, cam_h, recording_machine):
 
     end_video = video.BackgroundVideo(state.END_VIDEO_PATH)
     page_renderer = None          # overlays.TypewriterPage while a page is up
+    rec_video = None              # the recording, replayed beside the text
     instructions_renderer = None  # ditto, for the instructions screen
     instructions_start = None     # when the instructions typing began
 
@@ -447,7 +523,7 @@ def run(win, cap, frame, cam_w, cam_h, recording_machine):
             current_organism_text = state.organism_overlay_text
             state.organism_text_dirty = False
 
-        (page_text, page_start, page_cps, page_align,
+        (page_text, page_start, page_cps, page_align, page_inset,
          show_end_video) = state.get_sentences_page()
 
         # ── Restart ──
@@ -457,6 +533,9 @@ def run(win, cap, frame, cam_w, cam_h, recording_machine):
             recording_machine.reset()
             _clear_webcam_texture(gl)
             end_video.stop()
+            if rec_video is not None:
+                rec_video.stop()
+                rec_video = None
             page_renderer = None
             instructions_renderer = None
             instructions_start = None
@@ -479,11 +558,42 @@ def run(win, cap, frame, cam_w, cam_h, recording_machine):
 
         # ── Type out the sentences page ──
         page_visible = bool(page_text) and page_start is not None
+
+        # ── Recording inset: open it first, its aspect sets the text layout ──
+        if page_visible and page_inset and rec_video is None:
+            source = state.get_last_recording()
+            if source:
+                # Recordings are captured at config.VIDEO_FPS; an image
+                # sequence carries no frame rate, so tell the player.
+                player = video.BackgroundVideo(source,
+                                               default_fps=config.VIDEO_FPS)
+                if player.start(time.time()):
+                    rec_video = player
+        elif not page_visible and rec_video is not None:
+            rec_video.stop()
+            rec_video = None
+
+        inset_rect_px = None
         if page_visible:
+            avoid = page_top = None
+            if rec_video is not None:
+                # Box the shader's rect1 will fill; its own aspect, so the panel
+                # is not squeezed. The recording is stretched into rect1 by the
+                # shader exactly as the live camera is.
+                rect1_aspect = config.P['rect1W'] / config.P['rect1H']
+                rect = inset_rect_px = overlays.inset_rect(1920, 1080, rect1_aspect)
+                if page_inset:
+                    avoid = rect          # sentences flow around the recording
+                else:
+                    # thank-you: sits below the recording, which is still up
+                    page_top = int(rect[3]) + config.INSET_GUTTER
             if (page_renderer is None or page_renderer.text != page_text
-                    or page_renderer.align != page_align):
+                    or page_renderer.align != page_align
+                    or page_renderer.avoid != avoid
+                    or page_renderer.top != page_top):
                 page_renderer = overlays.TypewriterPage(page_text, 1920, 1080,
-                                                        align=page_align)
+                                                        align=page_align,
+                                                        avoid=avoid, top=page_top)
             typed = (time.monotonic() - page_start) * page_cps
             if page_renderer.set_visible(typed):
                 glBindTexture(GL_TEXTURE_2D, gl.sentences_tex)
@@ -508,12 +618,22 @@ def run(win, cap, frame, cam_w, cam_h, recording_machine):
             instructions_renderer = None
             instructions_start = None
 
+        # ── Recording frame: feeds both the shader patch and the preview ──
+        showing_recording = page_visible and rec_video is not None
+        rec_frame = rec_video.poll(time.time()) if showing_recording else None
+
         # ── Hide stale webcam frame while overlays show ──
-        if current_show_chat or current_show_organism:
+        if (current_show_chat or current_show_organism) and not showing_recording:
             _clear_webcam_texture(gl)
 
         # ── Webcam pipeline (only in running state, no chat) ──
-        if current_intro_state == "running" and not current_show_chat:
+        if showing_recording:
+            # The shader samples this texture for rect1, so the patch behind the
+            # preview melts the recording rather than the live camera.
+            if rec_frame is not None:
+                gl.cam_w, gl.cam_h = _upload_video_frame(
+                    gl.tex, rec_frame, (gl.cam_w, gl.cam_h))
+        elif current_intro_state == "running" and not current_show_chat:
             ret, frame = cap.read()
             if not ret:
                 print("WARNING: cap.read() failed - webcam not delivering frames")
@@ -540,9 +660,18 @@ def run(win, cap, frame, cam_w, cam_h, recording_machine):
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
             video_frame = end_video.poll(time.time())
             if video_frame is not None:
-                _upload_video_texture(gl, video_frame)
+                gl.video_w, gl.video_h = _upload_video_frame(
+                    gl.video_tex, video_frame, (gl.video_w, gl.video_h))
             if gl.video_w:
                 _draw_textured_quad(gl, gl.video_tex, gl.overlay_vbo)
+            if inset_rect_px is not None:
+                _render_terrain(gl, fb_w, fb_h, ctx, t0, True,
+                                viewport=_shader_patch_viewport(
+                                    inset_rect_px, fb_w, fb_h),
+                                frame_rect1=True)
+                # Restore the full viewport — every overlay after this one is a
+                # fullscreen quad and would otherwise be squeezed into the patch.
+                glViewport(0, 0, fb_w, fb_h)
         else:
             _render_terrain(gl, fb_w, fb_h, ctx, t0, webcam_visible)
 

@@ -35,7 +35,7 @@ def _sentences_worker(sentences, seconds_per_char):
         if not page_text:
             return
 
-        state.start_sentences_page(page_text, cps)
+        state.start_sentences_page(page_text, cps, inset=True)
         total = typing_seconds + config.SENTENCES_PAGE_HOLD
         print(f"API: Typing {len(sentences)} sentences over {typing_seconds:.1f}s "
               f"(+{config.SENTENCES_PAGE_HOLD:.0f}s hold)")

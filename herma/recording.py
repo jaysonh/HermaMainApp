@@ -205,6 +205,15 @@ class RecordingMachine:
             self.video_writer = None
         print(f"Stopped recording. Saved {self.img_index} frames.")
 
+        # Publish it for the sentences page to replay. cv2.VideoCapture reads a
+        # printf-style pattern as a sequence, so image-sequence recordings work
+        # the same way as an mp4.
+        if state.RECORDING_INPUT_TYPE == 'image_sequence':
+            source = str(self.seq_dir / "frame_%04d.jpg") if self.img_index else None
+        else:
+            source = str(self.video_path) if self.video_path is not None else None
+        state.set_last_recording(source)
+
         if self.api_triggered_recording:
             if state.RECORDING_INPUT_TYPE == 'image_sequence':
                 frames_snapshot = list(self.image_frame_paths)

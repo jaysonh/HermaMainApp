@@ -72,6 +72,12 @@ sentences_page_text = ""
 sentences_page_start = None   # time.monotonic() when typing began
 sentences_page_cps = 20.0     # characters per second
 sentences_page_align = "left"  # "left" for sentences, "center" for the thank-you
+sentences_page_inset = False   # play the recording alongside this page?
+
+# Path of the most recent recording, replayed beside the sentences. Either an
+# mp4 or a printf-style JPEG pattern (cv2.VideoCapture reads both).
+recording_source_lock = threading.Lock()
+last_recording_source = None
 
 # While the page (and the thank-you that follows it) is up, the terrain shader
 # is replaced by a looping background video.
@@ -106,13 +112,28 @@ def consume_restart_request() -> bool:
         return False
 
 
-def start_sentences_page(text, chars_per_second, align="left"):
+def set_last_recording(source):
+    """Remember the recording just finished, so the page can replay it."""
+    global last_recording_source
+    with recording_source_lock:
+        last_recording_source = source
+    if source:
+        print(f"Recording available for playback: {source}")
+
+
+def get_last_recording():
+    with recording_source_lock:
+        return last_recording_source
+
+
+def start_sentences_page(text, chars_per_second, align="left", inset=False):
     """Publish a page of text and start the typewriter clock."""
     global sentences_page_text, sentences_page_start, sentences_page_cps
-    global sentences_page_align, show_end_video
+    global sentences_page_align, sentences_page_inset, show_end_video
     with sentences_page_lock:
         sentences_page_text = text
         sentences_page_align = align
+        sentences_page_inset = inset
         sentences_page_cps = max(1.0, float(chars_per_second))
         sentences_page_start = time.monotonic()
         show_end_video = True
@@ -127,10 +148,10 @@ def clear_sentences_page():
 
 
 def get_sentences_page():
-    """Return ``(text, start, chars_per_second, align, show_end_video)``."""
+    """Return ``(text, start, cps, align, inset, show_end_video)``."""
     with sentences_page_lock:
-        return (sentences_page_text, sentences_page_start,
-                sentences_page_cps, sentences_page_align, show_end_video)
+        return (sentences_page_text, sentences_page_start, sentences_page_cps,
+                sentences_page_align, sentences_page_inset, show_end_video)
 
 
 def set_organism_text(text):
@@ -147,6 +168,7 @@ def reset_to_initial_state():
     global intro_state, show_organism, show_chat, chat_messages, latest_jpeg
     global organism_overlay_text, organism_text_dirty, sentences_stop
     global sentences_page_text, sentences_page_start, show_end_video
+    global sentences_page_inset, last_recording_source
 
     with control_lock:
         manual_record_command = None
@@ -177,7 +199,11 @@ def reset_to_initial_state():
     with sentences_page_lock:
         sentences_page_text = ""
         sentences_page_start = None
+        sentences_page_inset = False
         show_end_video = False
+
+    with recording_source_lock:
+        last_recording_source = None
 
     with jpeg_lock:
         latest_jpeg = None

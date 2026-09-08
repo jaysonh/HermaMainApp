@@ -213,16 +213,30 @@ _page_layout_cache = {}
 _PAGE_SIZES = (64, 56, 48, 44, 40, 36, 32, 28, 24, 20, 18)
 
 
+def inset_rect(width, height, video_aspect=None):
+    """Where the recording sits on the page, as ``(x0, y0, x1, y1)`` in pixels."""
+    aspect = video_aspect or config.INSET_FALLBACK_ASPECT
+    w = width * config.INSET_WIDTH_FRACTION
+    h = w / aspect
+    x1 = width - width * config.INSET_RIGHT_MARGIN_FRACTION
+    y0 = height * config.INSET_TOP_FRACTION
+    return (x1 - w, y0, x1, y0 + h)
+
+
 def _layout_page(draw, text, width, height, align, font_size,
-                 line_height, margin_x, margin_y):
+                 line_height, margin_x, margin_y, avoid, top):
     """Wrap a page of text and work out where every line goes.
 
     With ``font_size=None`` the largest size that still fits vertically is
-    chosen. Returns ``(font, lines, line_height, xs, y_start)`` where ``xs`` is
-    the x position of each line — for centred text that is the *finished*
-    line's position, so a half-typed line doesn't drift as it fills in.
+    chosen. ``avoid`` is an optional ``(x0, y0, x1, y1)`` rectangle the text
+    flows around — lines that would run into it stop short of its left edge.
+
+    Returns ``(font, lines, line_height, xs, y_start)`` where ``xs`` is the x
+    position of each line — for centred text that is the *finished* line's
+    position, so a half-typed line doesn't drift as it fills in.
     """
-    key = (text, width, height, align, font_size, line_height, margin_x, margin_y)
+    key = (text, width, height, align, font_size, line_height, margin_x,
+           margin_y, avoid, top)
     cached = _page_layout_cache.get(key)
     if cached is not None:
         return cached
@@ -230,8 +244,21 @@ def _layout_page(draw, text, width, height, align, font_size,
     margin_x = width // 10 if margin_x is None else margin_x
     margin_y = height // 12 if margin_y is None else margin_y
     max_w = width - margin_x * 2
-    max_h = height - margin_y * 2
+    max_h = (height - top - margin_y) if top is not None else height - margin_y * 2
     sizes = (font_size,) if font_size else _PAGE_SIZES
+
+    # Text sharing the page with the inset starts at the top, so each line's y
+    # — and therefore whether it collides with the inset — is known while
+    # wrapping. Without an inset the block stays vertically centred.
+    top_aligned = avoid is not None
+
+    def width_for(index, lh):
+        if avoid is None:
+            return max_w
+        y0 = margin_y + index * lh
+        if y0 + lh > avoid[1] and y0 < avoid[3]:
+            return max(width // 6, avoid[0] - config.INSET_GUTTER - margin_x)
+        return max_w
 
     font = None
     lines = []
@@ -249,7 +276,7 @@ def _layout_page(draw, text, width, height, align, font_size,
             for word in paragraph.split():
                 test = current + " " + word if current else word
                 bbox = draw.textbbox((0, 0), test, font=font)
-                if bbox[2] - bbox[0] <= max_w:
+                if bbox[2] - bbox[0] <= width_for(len(lines), lh):
                     current = test
                 else:
                     if current:
@@ -265,7 +292,12 @@ def _layout_page(draw, text, width, height, align, font_size,
     else:
         xs = [margin_x] * len(lines)
 
-    y_start = (height - len(lines) * lh) // 2
+    if top is not None:
+        y_start = top
+    elif top_aligned:
+        y_start = margin_y
+    else:
+        y_start = (height - len(lines) * lh) // 2
     result = (font, lines, lh, xs, y_start)
 
     _page_layout_cache.clear()  # at most a couple of pages exist at a time
@@ -284,11 +316,14 @@ class TypewriterPage:
     """
 
     def __init__(self, text, width, height, align="left", font_size=None,
-                 line_height=None, margin_x=None, margin_y=None):
+                 line_height=None, margin_x=None, margin_y=None, avoid=None,
+                 top=None):
         self.text = text
         self.width = width
         self.height = height
         self.align = align
+        self.avoid = avoid
+        self.top = top
         self.total_chars = sentences_page_total_chars(text)
 
         self.img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
@@ -299,7 +334,7 @@ class TypewriterPage:
         (self.font, self.lines, self.line_height,
          self.xs, self.y_start) = _layout_page(
             self.draw, text, width, height, align, font_size,
-            line_height, margin_x, margin_y)
+            line_height, margin_x, margin_y, avoid, top)
 
         # Where each wrapped line starts in the character stream. The line break
         # itself counts as one character, matching sentences_page_total_chars.
