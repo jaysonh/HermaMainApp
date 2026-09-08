@@ -28,7 +28,7 @@ manual_record_command = None        # None | "start" | "stop"
 recording_start_time = None
 current_status = {
     "recording": False,
-    "video_path": None,
+    "capture_path": None,
     "frames_captured": 0,
     "last_motion_time": None,
     "time_remaining": None,
@@ -74,8 +74,7 @@ sentences_page_cps = 20.0     # characters per second
 sentences_page_align = "left"  # "left" for sentences, "center" for the thank-you
 sentences_page_inset = False   # play the recording alongside this page?
 
-# Path of the most recent recording, replayed beside the sentences. Either an
-# mp4 or a printf-style JPEG pattern (cv2.VideoCapture reads both).
+# Path of the still captured for this run, shown beside the sentences.
 recording_source_lock = threading.Lock()
 last_recording_source = None
 
@@ -84,14 +83,12 @@ last_recording_source = None
 show_end_video = False
 
 # ─── Runtime-mutable Config ─────────────────────────────────────────────────
-# These look like config but are mutated at startup (from TOML / env vars)
-# or at runtime (RECORDING_INPUT_TYPE), so they live here rather than in
-# herma.config which is import-time-only.
+# These look like config but are mutated at startup (from TOML / env vars),
+# so they live here rather than in herma.config which is import-time-only.
 
 API_KEY = os.environ.get("MONITOR_API_KEY", "jayson")
 AWS_UPLOAD_URL = os.environ.get("AWS_UPLOAD_URL", "http://10.142.77.6:5009/api/upload")
 AWS_UPLOAD_KEY = os.environ.get("AWS_UPLOAD_KEY", "jayson")
-RECORDING_INPUT_TYPE = "video"  # "video" or "image_sequence" — refreshed per-recording
 END_VIDEO_PATH = config.END_VIDEO_PATH  # overridden from config.toml in main()
 
 
@@ -113,12 +110,12 @@ def consume_restart_request() -> bool:
 
 
 def set_last_recording(source):
-    """Remember the recording just finished, so the page can replay it."""
+    """Remember the still just captured, so the page can show it."""
     global last_recording_source
     with recording_source_lock:
         last_recording_source = source
     if source:
-        print(f"Recording available for playback: {source}")
+        print(f"Capture available for the sentences page: {source}")
 
 
 def get_last_recording():
@@ -175,7 +172,7 @@ def reset_to_initial_state():
         recording_start_time = None
         current_status = {
             "recording": False,
-            "video_path": None,
+            "capture_path": None,
             "frames_captured": 0,
             "last_motion_time": None,
             "time_remaining": None,

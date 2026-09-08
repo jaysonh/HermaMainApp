@@ -493,7 +493,7 @@ def run(win, cap, frame, cam_w, cam_h, recording_machine):
 
     end_video = video.BackgroundVideo(state.END_VIDEO_PATH)
     page_renderer = None          # overlays.TypewriterPage while a page is up
-    rec_video = None              # the recording, replayed beside the text
+    rec_video = None              # the captured still, shown beside the text
     instructions_renderer = None  # ditto, for the instructions screen
     instructions_start = None     # when the instructions typing began
 
@@ -559,14 +559,11 @@ def run(win, cap, frame, cam_w, cam_h, recording_machine):
         # ── Type out the sentences page ──
         page_visible = bool(page_text) and page_start is not None
 
-        # ── Recording inset: open it first, its aspect sets the text layout ──
+        # ── Capture inset: open it first, its aspect sets the text layout ──
         if page_visible and page_inset and rec_video is None:
             source = state.get_last_recording()
             if source:
-                # Recordings are captured at config.VIDEO_FPS; an image
-                # sequence carries no frame rate, so tell the player.
-                player = video.BackgroundVideo(source,
-                                               default_fps=config.VIDEO_FPS)
+                player = video.StillImage(source)
                 if player.start(time.time()):
                     rec_video = player
         elif not page_visible and rec_video is not None:
@@ -578,14 +575,14 @@ def run(win, cap, frame, cam_w, cam_h, recording_machine):
             avoid = page_top = None
             if rec_video is not None:
                 # Box the shader's rect1 will fill; its own aspect, so the panel
-                # is not squeezed. The recording is stretched into rect1 by the
+                # is not squeezed. The capture is stretched into rect1 by the
                 # shader exactly as the live camera is.
                 rect1_aspect = config.P['rect1W'] / config.P['rect1H']
                 rect = inset_rect_px = overlays.inset_rect(1920, 1080, rect1_aspect)
                 if page_inset:
-                    avoid = rect          # sentences flow around the recording
+                    avoid = rect          # sentences flow around the capture
                 else:
-                    # thank-you: sits below the recording, which is still up
+                    # thank-you: sits below the capture, which is still up
                     page_top = int(rect[3]) + config.INSET_GUTTER
             if (page_renderer is None or page_renderer.text != page_text
                     or page_renderer.align != page_align
@@ -605,9 +602,12 @@ def run(win, cap, frame, cam_w, cam_h, recording_machine):
         # ── Type out the instructions screen ──
         if current_intro_state == "instructions":
             if instructions_renderer is None:
+                # Auto-fit rather than a fixed 64px: the onboarding text is
+                # long enough that a fixed size overflows the screen.
                 instructions_renderer = overlays.TypewriterPage(
                     config.ONBOARDING_TEXT, 1920, 1080,
-                    align="center", font_size=64, line_height=90, margin_x=80)
+                    align="center", margin_x=80,
+                    stroke_width=config.INSTRUCTIONS_OUTLINE_WIDTH)
                 instructions_start = time.monotonic()
             typed = (time.monotonic() - instructions_start) * config.INSTRUCTIONS_CPS
             if instructions_renderer.set_visible(typed):
@@ -618,7 +618,7 @@ def run(win, cap, frame, cam_w, cam_h, recording_machine):
             instructions_renderer = None
             instructions_start = None
 
-        # ── Recording frame: feeds both the shader patch and the preview ──
+        # ── Capture frame: feeds both the shader patch and the preview ──
         showing_recording = page_visible and rec_video is not None
         rec_frame = rec_video.poll(time.time()) if showing_recording else None
 
@@ -629,7 +629,7 @@ def run(win, cap, frame, cam_w, cam_h, recording_machine):
         # ── Webcam pipeline (only in running state, no chat) ──
         if showing_recording:
             # The shader samples this texture for rect1, so the patch behind the
-            # preview melts the recording rather than the live camera.
+            # preview melts the captured still rather than the live camera.
             if rec_frame is not None:
                 gl.cam_w, gl.cam_h = _upload_video_frame(
                     gl.tex, rec_frame, (gl.cam_w, gl.cam_h))

@@ -87,8 +87,7 @@ def main():
 
     threading.Thread(target=run_web_server, daemon=True).start()
     print(f"Web server: http://{config.WEB_HOST}:{config.WEB_PORT}/")
-    print(f"Recording timeout: {config.RECORDING_TIMEOUT}s, "
-          f"Capture interval: {config.CAPTURE_INTERVAL}s")
+    print(f"Capture timeout: {config.RECORDING_TIMEOUT}s")
 
     try:
         render_loop.run(win, cap, frame, cam_w, cam_h, machine)

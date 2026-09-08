@@ -1,7 +1,7 @@
 """HTTP and SSE communication with HermaSentiChat / HermaUploadReceiver.
 
-The flow after a recording stops:
-    1. Upload frames or video to ``state.AWS_UPLOAD_URL``.
+The flow after the capture is taken:
+    1. Upload the still frame to ``state.AWS_UPLOAD_URL``.
     2. Open SSE connection to port 5002 (``/api/analyse-video-agents``).
     3. When ``agent2b`` completes, set the organism overlay text and
        POST organism info to ``/api/chatready``.
@@ -16,89 +16,38 @@ import requests
 from . import config, state
 
 
-def fetch_recording_mode() -> str:
-    """Fetch the recording ``input_type`` from HermaSentiChat settings.
+def upload_and_analyse_capture(image_path):
+    """Upload the single captured frame to HermaUploadReceiver, then send it
+    to HermaSentiChat for organ analysis."""
+    image_path = Path(image_path)
+    if not image_path.exists():
+        print(f"No capture to upload: {image_path}")
+        return
 
-    Returns ``'video'`` (default) or ``'image_sequence'``.
-    """
-    parsed = urlparse(state.AWS_UPLOAD_URL)
-    url = f"http://{parsed.hostname}:5002/api/settings/recording-mode"
+    seq_name = image_path.parent.name
     try:
-        resp = requests.get(url, timeout=5)
-        if resp.ok:
-            mode = resp.json().get('input_type', 'video')
-            print(f"Recording mode from server: {mode}")
-            return mode
-    except Exception as e:
-        print(f"Could not fetch recording mode (defaulting to 'video'): {e}")
-    return 'video'
-
-
-def upload_video(video_path: Path):
-    if not video_path.exists():
-        print(f"No video to upload: {video_path}")
-        return False
-    try:
-        print(f"Uploading video {video_path.name}...")
-        with open(video_path, "rb") as fh:
+        print(f"Uploading capture {image_path.name} as '{seq_name}'...")
+        with open(image_path, "rb") as fh:
             response = requests.post(
                 state.AWS_UPLOAD_URL,
                 headers={"X-API-Key": state.AWS_UPLOAD_KEY},
-                files={"files": (video_path.name, fh, "video/mp4")},
+                files={"files": (image_path.name, fh, "image/jpeg")},
                 data={
-                    "sequence_name": video_path.parent.name,
-                    "timestamp": video_path.parent.name,
+                    "sequence_name": seq_name,
+                    "image_count": "1",
+                    "timestamp": seq_name,
                 },
                 timeout=120,
             )
         if response.ok:
-            print(f"Upload successful: {response.json()}")
-            state.set_organism_text(config.LOADING_TEXT)
-            analyse_video(video_path)
-            return True
-        print(f"Upload failed: {response.status_code} - {response.text}")
-        return False
-    except requests.exceptions.RequestException as e:
-        print(f"Upload error: {e}")
-        return False
-
-
-def upload_and_analyse_images(image_paths: list, seq_name: str):
-    """Upload image frames to HermaUploadReceiver, then send to HermaSentiChat for analysis."""
-    if not image_paths:
-        print("No image frames to upload")
-        return
-
-    try:
-        print(f"Uploading {len(image_paths)} frames to receiver as sequence '{seq_name}'...")
-        open_files = []
-        multipart = []
-        for p in image_paths:
-            fh = open(p, 'rb')
-            open_files.append(fh)
-            multipart.append(('files', (Path(p).name, fh, 'image/jpeg')))
-        response = requests.post(
-            state.AWS_UPLOAD_URL,
-            headers={"X-API-Key": state.AWS_UPLOAD_KEY},
-            files=multipart,
-            data={
-                "sequence_name": seq_name,
-                "image_count": str(len(image_paths)),
-                "timestamp": seq_name,
-            },
-            timeout=120,
-        )
-        for fh in open_files:
-            fh.close()
-        if response.ok:
-            print(f"Image upload successful: {response.json()}")
+            print(f"Capture upload successful: {response.json()}")
         else:
-            print(f"Image upload failed: {response.status_code} - {response.text}")
+            print(f"Capture upload failed: {response.status_code} - {response.text}")
     except requests.exceptions.RequestException as e:
-        print(f"Image upload error: {e}")
+        print(f"Capture upload error: {e}")
 
     state.set_organism_text(config.LOADING_TEXT)
-    analyse_images(image_paths)
+    analyse_capture(image_path)
 
 
 def _consume_analysis_stream(response, parsed_upload_url):
@@ -140,45 +89,21 @@ def _consume_analysis_stream(response, parsed_upload_url):
             break
 
 
-def analyse_images(image_paths: list):
-    """Call the analyse endpoint with image frames, stream SSE, display results."""
+def analyse_capture(image_path):
+    """Call the analyse endpoint with the single captured frame, stream SSE,
+    display results."""
+    image_path = Path(image_path)
     parsed = urlparse(state.AWS_UPLOAD_URL)
     url = f"http://{parsed.hostname}:5002/api/analyse-video-agents"
-    print(f"Starting image sequence analysis ({len(image_paths)} frames)...")
+    print(f"Starting image analysis for: {image_path}")
+    # The analysis backend flattens every upload into one folder, so the run's
+    # timestamp goes in the filename rather than "capture.jpg" every time.
+    upload_name = f"{image_path.parent.name}{image_path.suffix}"
     try:
-        open_files = []
-        multipart = []
-        for p in image_paths:
-            fh = open(p, 'rb')
-            open_files.append(fh)
-            multipart.append(('images', (Path(p).name, fh, 'image/jpeg')))
-        response = requests.post(
-            url,
-            files=multipart,
-            params={"agent2c": "false", "agent3": "false"},
-            stream=True,
-            timeout=300,
-        )
-        for fh in open_files:
-            fh.close()
-        if not response.ok:
-            print(f"Analysis request failed: {response.status_code} - {response.text}")
-            return
-        _consume_analysis_stream(response, parsed)
-    except requests.exceptions.RequestException as e:
-        print(f"Analysis error: {e}")
-
-
-def analyse_video(video_path: Path):
-    """Call the video analysis endpoint, stream SSE, display results."""
-    parsed = urlparse(state.AWS_UPLOAD_URL)
-    url = f"http://{parsed.hostname}:5002/api/analyse-video-agents"
-    print(f"Starting video analysis for: {video_path}")
-    try:
-        with open(video_path, "rb") as fh:
+        with open(image_path, "rb") as fh:
             response = requests.post(
                 url,
-                files={"video": (video_path.name, fh, "video/mp4")},
+                files={"image": (upload_name, fh, "image/jpeg")},
                 params={"agent2c": "false", "agent3": "false"},
                 stream=True,
                 timeout=300,

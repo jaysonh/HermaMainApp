@@ -317,13 +317,14 @@ class TypewriterPage:
 
     def __init__(self, text, width, height, align="left", font_size=None,
                  line_height=None, margin_x=None, margin_y=None, avoid=None,
-                 top=None):
+                 top=None, stroke_width=None):
         self.text = text
         self.width = width
         self.height = height
         self.align = align
         self.avoid = avoid
         self.top = top
+        self.stroke_width = stroke_width
         self.total_chars = sentences_page_total_chars(text)
 
         self.img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
@@ -374,7 +375,8 @@ class TypewriterPage:
             if already:
                 x += self.draw.textlength(line[:already], font=self.font)
             line_y = self.y_start + i * self.line_height
-            _draw_outlined_text(self.draw, (x, line_y), line[already:now], self.font)
+            _draw_outlined_text(self.draw, (x, line_y), line[already:now],
+                                self.font, stroke_width=self.stroke_width)
             dirty_top = min(dirty_top, line_y - self.line_height)
             dirty_bottom = max(dirty_bottom, line_y + self.line_height * 2)
 

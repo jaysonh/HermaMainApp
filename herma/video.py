@@ -1,9 +1,13 @@
-"""Background video playback for the sentences page.
+"""Sources that feed a GL texture on the sentences page.
 
-While the generated sentences are on screen the terrain shader is hidden and
-this plays a video behind the text instead. Decoding happens on the render
-thread, one frame at a time, paced by the file's own frame rate — a full-file
-preload would cost hundreds of MB for a 1080p clip.
+``BackgroundVideo`` plays the looping clip that replaces the terrain shader
+behind the text. Decoding happens on the render thread, one frame at a time,
+paced by the file's own frame rate — a full-file preload would cost hundreds
+of MB for a 1080p clip.
+
+``StillImage`` wears the same interface but holds a single frame: it is what
+the preview area shows, since the run captures one screenshot rather than a
+video.
 """
 
 from pathlib import Path
@@ -90,3 +94,55 @@ class BackgroundVideo:
 
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         return cv2.flip(frame, 0)  # GL quads sample with v=0 at the bottom
+
+
+class StillImage:
+    """A single image behind the same interface as ``BackgroundVideo``.
+
+    ``poll`` hands the frame over once and returns None thereafter — the render
+    loop keeps re-using the texture it already uploaded, so the still just sits
+    there.
+    """
+
+    def __init__(self, path, default_fps=None):
+        self.path = Path(path).expanduser()
+        self.frame = None
+        self.aspect = None
+        self._delivered = False
+
+    @property
+    def active(self):
+        return self.frame is not None
+
+    def start(self, now):
+        if self.frame is not None:
+            return True
+        if not self.path.exists():
+            print(f"Capture image not found: {self.path}")
+            return False
+
+        img = cv2.imread(str(self.path))
+        if img is None:
+            print(f"Could not read capture image: {self.path}")
+            return False
+
+        h, w = img.shape[:2]
+        self.aspect = (w / h) if h else None
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        self.frame = cv2.flip(img, 0)  # GL quads sample with v=0 at the bottom
+        self._delivered = False
+        print(f"Capture image shown: {self.path.name} ({w}x{h})")
+        return True
+
+    def stop(self):
+        if self.frame is not None:
+            self.frame = None
+            self._delivered = False
+            print("Capture image cleared")
+
+    def poll(self, now):
+        """Return the frame the first time it is asked for, then None."""
+        if self.frame is None or self._delivered:
+            return None
+        self._delivered = True
+        return self.frame

@@ -38,23 +38,23 @@ P = dict(
     rect4Hue=0.2, rect4Sat=1.3, rect4Bright=1.0, rect4Contrast=1.0,
 )
 
-# ─── Recording / Motion ─────────────────────────────────────────────────────
+# ─── Capture / Motion ───────────────────────────────────────────────────────
 
 MOTION_THRESHOLD = 25
 MIN_MOTION_AREA = 2500
 
-CAPTURE_INTERVAL = 0.5
+# How long the capture window stays open before the still is taken anyway.
 RECORDING_TIMEOUT = 30.0
-STILL_SECONDS_TO_STOP = 5.0
 
 DOWNSCALE_WIDTH = 1920
 OUTPUT_DIR_API = Path("recorded")
 OUTPUT_DIR_AUTO = Path("tmp")
 
-VIDEO_WIDTH = 640
-VIDEO_HEIGHT = 480
-VIDEO_FPS = 10
-VIDEO_FRAME_INTERVAL = 1.0 / VIDEO_FPS
+# The still captured when [COMPLETE] is pressed. It is the only input the
+# organ analysis gets, so it is kept large — downscaled just enough to keep
+# the upload quick.
+CAPTURE_MAX_WIDTH = 1280
+CAPTURE_JPEG_QUALITY = 90
 
 # ─── Web Server ─────────────────────────────────────────────────────────────
 
@@ -75,9 +75,14 @@ MAX_CHAT_MESSAGES = 10
 # ─── Onboarding / Organism Text ─────────────────────────────────────────────
 
 ONBOARDING_TEXT = (
-    "The objects in front of you are precise replicas of human internal organs."
-    "You are invited to make your own arrangement, using as many or as few as you wish."
-    "Pick up the first organ to start creating a new anatomy."
+    "The objects in front of you are replicas of human internal organs.\n"
+    "\n"
+    "Create your own anatomy by choosing and arranging the organs on the "
+    "table. You may use as many or as few as you wish.\n"
+    "\n"
+    "Press [NEW ANATOMY] to begin.\n"
+    "\n"
+    "When you are satisfied with your creation press [COMPLETE]"
 )
 ORGANISM_TEXT = ""
 
@@ -132,6 +137,9 @@ THANK_YOU_HOLD = 10.0
 
 # Typing speed of the instructions screen, in characters per second.
 INSTRUCTIONS_CPS = 25.0
+# Its outline width in pixels. The shared rule scales the stroke with the font
+# size, which leaves this screen thin now that it auto-fits smaller.
+INSTRUCTIONS_OUTLINE_WIDTH = 3
 
 
 # ─── TOML Loading ───────────────────────────────────────────────────────────

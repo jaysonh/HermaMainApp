@@ -1,5 +1,9 @@
-"""Recording / streaming endpoints: /, /stream, /api/start, /api/stop,
-/api/auto, /api/status, /api/snapshot."""
+"""Capture / streaming endpoints: /, /stream, /api/start, /api/stop,
+/api/auto, /api/status, /api/snapshot.
+
+/api/start opens the capture window (the live feed the visitor arranges organs
+in); /api/stop — the [COMPLETE] button — closes it, and the render thread saves
+the frame that was on screen and sends it off for analysis."""
 
 import time
 from urllib.parse import urlparse
@@ -33,7 +37,7 @@ def index():
     return f"""<!doctype html><html><head><title>Herma Monitor</title>
 <style>body{{font-family:system-ui;margin:24px}}img{{max-width:100%}}</style></head>
 <body><h2>Herma Webcam Stream</h2>
-<p>Recording timeout: {config.RECORDING_TIMEOUT}s | Capture interval: {config.CAPTURE_INTERVAL}s</p>
+<p>Capture timeout: {config.RECORDING_TIMEOUT}s</p>
 <img src="/stream"/></body></html>"""
 
 
@@ -54,7 +58,7 @@ def api_start():
     with state.chat_lock:
         state.show_chat = False
         state.chat_messages = []
-    print(f"API: Start recording (timeout in {config.RECORDING_TIMEOUT}s)")
+    print(f"API: Capture window open (auto-capture in {config.RECORDING_TIMEOUT}s)")
     return jsonify({"status": "ok", "action": "start_recording",
                     "timeout_seconds": config.RECORDING_TIMEOUT,
                     "output_dir": str(config.OUTPUT_DIR_API)})
@@ -71,7 +75,7 @@ def api_stop():
     with state.chat_lock:
         state.show_chat = False
     state.set_organism_text(config.LOADING_TEXT)
-    print("API: Stop recording requested - waiting for sentences")
+    print("API: Capture requested - screenshot goes off for analysis, waiting for sentences")
     return jsonify({"status": "ok", "action": "stop_recording", "waiting_for_sentences": True})
 
 

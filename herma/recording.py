@@ -1,20 +1,22 @@
-"""Per-frame recording state machine.
+"""Per-frame capture state machine.
 
-``RecordingMachine`` owns all per-recording transient state: motion
-detection background, the active video writer or image-sequence
-directory, frame counters, and HUD output. The render loop calls
-``step(frame, now)`` once per webcam frame; the machine takes care of
-running motion detection, advancing the start/stop state machine,
-writing frames to disk, and (on stop) kicking off the upload thread.
+``RecordingMachine`` owns all per-capture transient state: motion
+detection background, the output directory for the current run, and HUD
+output. The render loop calls ``step(frame, now)`` once per webcam frame;
+the machine takes care of running motion detection and advancing the
+start/stop state machine.
+
+Nothing is written while the capture window is open — the experience is a
+single still. When the window closes (the [COMPLETE] button hitting
+``/api/stop``, or the timeout) the most recent frame is saved as one JPEG
+and handed to the upload thread.
 """
 
 import math
 import threading
 from datetime import datetime
-from pathlib import Path
 
 import cv2
-import numpy as np
 
 from . import config, remote, state
 
@@ -28,19 +30,16 @@ class RecordingMachine:
         # Motion detection
         self.bg = None
 
-        # Recording state
+        # Capture state
         self.recording = False
         self.seq_dir = None
-        self.video_writer = None
-        self.video_path = None
-        self.image_frame_paths = []
+        self.capture_path = None
+        self.last_frame = None          # most recent frame, saved on stop
         self.api_triggered_recording = False
         self.last_cmd = None
 
         # Timers / counters
         self.last_motion_time = 0.0
-        self.last_capture_time = 0.0
-        self.last_video_frame_time = 0.0
         self.img_index = 0
         self.last_stream_time = 0.0
         self.stream_interval = 1.0 / float(config.STREAM_FPS)
@@ -56,17 +55,12 @@ class RecordingMachine:
         config.OUTPUT_DIR_AUTO.mkdir(parents=True, exist_ok=True)
 
     def reset(self):
-        if self.video_writer is not None:
-            self.video_writer.release()
-            self.video_writer = None
-        self.video_path = None
+        self.capture_path = None
+        self.last_frame = None
         self.bg = None
         self.recording = False
         self.seq_dir = None
-        self.image_frame_paths = []
         self.last_motion_time = 0.0
-        self.last_capture_time = 0.0
-        self.last_video_frame_time = 0.0
         self.img_index = 0
         self.last_stream_time = 0.0
         self.api_triggered_recording = False
@@ -83,12 +77,14 @@ class RecordingMachine:
 
         Returns the (possibly modified) BGR frame to upload to the GL texture.
         Side effects: writes to ``state.latest_jpeg`` and ``state.current_status``.
+        The frame is stashed as ``self.last_frame`` so ``_stop_recording`` can
+        save it — the state machine is advanced *after* the stash, so a stop
+        arriving on this frame captures this frame.
         """
         frame = self._downscale(frame)
+        self.last_frame = frame
         has_motion = self._detect_motion(frame)
         self._advance_state_machine(now)
-        if self.recording:
-            self._capture_frame(frame, now)
         self._update_status(now)
         self._update_hud(has_motion)
         self._encode_stream_jpeg(frame, now)
@@ -138,8 +134,7 @@ class RecordingMachine:
         self.last_cmd = cmd
 
         if api_start_just_called and self.recording and not self.api_triggered_recording:
-            print(f"Stopping motion recording for API recording. "
-                  f"Saved {self.img_index} images to {self.seq_dir}")
+            print(f"Abandoning motion capture window {self.seq_dir} for an API one")
             self.recording = False
 
         # Timeout
@@ -173,11 +168,8 @@ class RecordingMachine:
     def _start_recording(self, is_api_trigger):
         self.recording = True
         self.img_index = 0
-        self.image_frame_paths = []
-        self.last_capture_time = 0.0
-        self.last_video_frame_time = 0.0
+        self.capture_path = None
         self.api_triggered_recording = is_api_trigger
-        state.RECORDING_INPUT_TYPE = remote.fetch_recording_mode()
 
         output_dir = config.OUTPUT_DIR_API if self.api_triggered_recording else config.OUTPUT_DIR_AUTO
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -186,72 +178,48 @@ class RecordingMachine:
         self.seq_dir.mkdir(parents=True, exist_ok=True)
 
         trigger_type = "API" if self.api_triggered_recording else "MOTION"
-        if state.RECORDING_INPUT_TYPE == 'image_sequence':
-            self.video_path = None
-            self.video_writer = None
-            print(f"Started image sequence recording: {self.seq_dir} (triggered by: {trigger_type})")
-        else:
-            self.video_path = self.seq_dir / "vid.mp4"
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            self.video_writer = cv2.VideoWriter(
-                str(self.video_path), fourcc, config.VIDEO_FPS,
-                (config.VIDEO_WIDTH, config.VIDEO_HEIGHT))
-            print(f"Started video recording: {self.video_path} (triggered by: {trigger_type})")
+        print(f"Capture window open: {self.seq_dir} (triggered by: {trigger_type})")
 
     def _stop_recording(self):
         self.recording = False
-        if self.video_writer is not None:
-            self.video_writer.release()
-            self.video_writer = None
-        print(f"Stopped recording. Saved {self.img_index} frames.")
-
-        # Publish it for the sentences page to replay. cv2.VideoCapture reads a
-        # printf-style pattern as a sequence, so image-sequence recordings work
-        # the same way as an mp4.
-        if state.RECORDING_INPUT_TYPE == 'image_sequence':
-            source = str(self.seq_dir / "frame_%04d.jpg") if self.img_index else None
+        self.capture_path = self._save_capture()
+        if self.capture_path is None:
+            print("Capture window closed, but no webcam frame was available")
         else:
-            source = str(self.video_path) if self.video_path is not None else None
-        state.set_last_recording(source)
+            print(f"Captured still: {self.capture_path}")
 
-        if self.api_triggered_recording:
-            if state.RECORDING_INPUT_TYPE == 'image_sequence':
-                frames_snapshot = list(self.image_frame_paths)
-                seq_name = self.seq_dir.name if self.seq_dir else _timestamp_folder_name()
-                threading.Thread(
-                    target=remote.upload_and_analyse_images,
-                    args=(frames_snapshot, seq_name),
-                    daemon=True,
-                ).start()
-            elif self.video_path is not None:
-                threading.Thread(
-                    target=remote.upload_video,
-                    args=(self.video_path,),
-                    daemon=True,
-                ).start()
+        # Publish it for the sentences page to show beside the text.
+        state.set_last_recording(str(self.capture_path) if self.capture_path else None)
+
+        if self.api_triggered_recording and self.capture_path is not None:
+            threading.Thread(
+                target=remote.upload_and_analyse_capture,
+                args=(self.capture_path,),
+                daemon=True,
+            ).start()
 
         self.api_triggered_recording = False
-        self.video_path = None
-        self.image_frame_paths = []
         with state.control_lock:
             if state.manual_record_command == "stop":
                 state.manual_record_command = None
 
-    def _capture_frame(self, frame, now):
-        if state.RECORDING_INPUT_TYPE == 'image_sequence':
-            if (now - self.last_video_frame_time) >= config.VIDEO_FRAME_INTERVAL:
-                small = cv2.resize(frame, (config.VIDEO_WIDTH, config.VIDEO_HEIGHT))
-                frame_path = self.seq_dir / f"frame_{self.img_index:04d}.jpg"
-                cv2.imwrite(str(frame_path), small, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
-                self.image_frame_paths.append(str(frame_path))
-                self.img_index += 1
-                self.last_video_frame_time = now
-        elif self.video_writer is not None:
-            if (now - self.last_video_frame_time) >= config.VIDEO_FRAME_INTERVAL:
-                video_frame = cv2.resize(frame, (config.VIDEO_WIDTH, config.VIDEO_HEIGHT))
-                self.video_writer.write(video_frame)
-                self.img_index += 1
-                self.last_video_frame_time = now
+    def _save_capture(self):
+        """Write the most recent webcam frame to ``<seq_dir>/capture.jpg``."""
+        if self.last_frame is None or self.seq_dir is None:
+            return None
+        frame = self.last_frame
+        fh, fw = frame.shape[:2]
+        if fw > config.CAPTURE_MAX_WIDTH:
+            scale = config.CAPTURE_MAX_WIDTH / float(fw)
+            frame = cv2.resize(frame, (int(fw * scale), int(fh * scale)),
+                               interpolation=cv2.INTER_AREA)
+        path = self.seq_dir / "capture.jpg"
+        if not cv2.imwrite(str(path), frame,
+                           [int(cv2.IMWRITE_JPEG_QUALITY), config.CAPTURE_JPEG_QUALITY]):
+            print(f"Failed to write capture: {path}")
+            return None
+        self.img_index = 1
+        return path
 
     def _update_status(self, now):
         time_remaining = None
@@ -261,7 +229,7 @@ class RecordingMachine:
         with state.control_lock:
             state.current_status = {
                 "recording": self.recording,
-                "video_path": str(self.video_path) if self.video_path else None,
+                "capture_path": str(self.capture_path) if self.capture_path else None,
                 "frames_captured": self.img_index,
                 "last_motion_time": self.last_motion_time,
                 "time_remaining": time_remaining,
@@ -280,7 +248,7 @@ class RecordingMachine:
             self.hud_mode = "AUTO"
 
         if self.recording:
-            self.hud_state = "REC (API)" if self.api_triggered_recording else "REC (MOTION)"
+            self.hud_state = "CAP (API)" if self.api_triggered_recording else "CAP (MOTION)"
         else:
             self.hud_state = "IDLE"
 
