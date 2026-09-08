@@ -90,6 +90,9 @@ FONT_PATH = str(ASSETS_DIR / "sylfaen.ttf")
 # message, organism name + description) and chat bubbles — uses Cascadia Code.
 # Only the HUD status bar still uses FONT_PATH.
 OVERLAY_FONT_PATH = str(ASSETS_DIR / "CascadiaCode-Regular.ttf")
+# Those overlays draw black text with a white outline.
+TEXT_FILL = (0, 0, 0, 255)
+TEXT_OUTLINE = (255, 255, 255, 255)
 LOGO_PATH = ASSETS_DIR / "LogoV2.png"
 
 

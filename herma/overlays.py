@@ -22,6 +22,21 @@ def _load_font(size, path=None):
         return ImageFont.load_default()
 
 
+def _draw_outlined_text(draw, xy, text, font, anchor=None):
+    """Draw black text with a white outline — the look shared by every Cascadia overlay.
+
+    The stroke is scaled off the font size so it stays proportional from the
+    22px chat bubbles up to the 64px instructions screen.
+    """
+    draw.text(
+        xy, text, font=font,
+        fill=config.TEXT_FILL,
+        stroke_width=max(1, round(font.size / 20)),
+        stroke_fill=config.TEXT_OUTLINE,
+        anchor=anchor,
+    )
+
+
 def _animated_dots():
     """Return 1-3 dots cycling based on current time."""
     return "." * (int(time.time() * 2) % 3 + 1)
@@ -91,7 +106,7 @@ def render_overlay_text(text, width, height):
         text_w = bbox[2] - bbox[0]
         x = (width - text_w) // 2
         y = y_start + i * line_height
-        draw.text((x, y), line, font=font, fill=(0, 0, 0, 255))
+        _draw_outlined_text(draw, (x, y), line, font)
 
     img = np.array(pil_img, dtype=np.uint8)
     img = cv2.flip(img, 0)
@@ -175,14 +190,14 @@ def render_organism_overlay(text, width, height):
     text_y = panel_y + panel_padding
 
     for tl in title_lines:
-        draw.text((text_x, text_y), tl, font=title_font, fill=(255, 255, 255, 255))
+        _draw_outlined_text(draw, (text_x, text_y), tl, title_font)
         text_y += title_line_height
     if title_lines:
         text_y += title_bottom_gap
 
     for bl in body_lines:
         if bl:
-            draw.text((text_x, text_y), bl, font=body_font, fill=(220, 220, 220, 255))
+            _draw_outlined_text(draw, (text_x, text_y), bl, body_font)
         text_y += line_height
 
     img = np.array(pil_img, dtype=np.uint8)
@@ -267,11 +282,9 @@ def render_chat_messages(messages, width, height):
 
         if sender == "organism":
             bubble_x = padding
-            text_color = (255, 255, 255, 255)
             bubble_color = (0, 0, 0, 220)
         else:
             bubble_x = width - bw - padding
-            text_color = (0, 0, 0, 255)
             bubble_color = (255, 255, 255, 220)
 
         bubble_y = y_position
@@ -281,8 +294,7 @@ def render_chat_messages(messages, width, height):
 
         text_y = bubble_y + bubble_padding
         for line in lines:
-            draw.text((bubble_x + bubble_padding, text_y), line,
-                      font=font, fill=text_color)
+            _draw_outlined_text(draw, (bubble_x + bubble_padding, text_y), line, font)
             text_y += line_height
 
         y_position = bubble_y + bh + message_spacing
@@ -300,19 +312,17 @@ def render_chat_messages(messages, width, height):
 
     if dots_sender == "organism":
         dots_x = padding
-        dots_text_color = (255, 255, 255, 255)
         dots_bubble_color = (0, 0, 0, 220)
     else:
         dots_x = width - dots_bw - padding
-        dots_text_color = (0, 0, 0, 255)
         dots_bubble_color = (255, 255, 255, 220)
 
     if y_position + dots_bh >= 0:
         draw.rectangle(
             [(dots_x, y_position), (dots_x + dots_bw, y_position + dots_bh)],
             fill=dots_bubble_color)
-        draw.text((dots_x + bubble_padding, y_position + bubble_padding),
-                  dots_text, font=font, fill=dots_text_color)
+        _draw_outlined_text(draw, (dots_x + bubble_padding, y_position + bubble_padding),
+                            dots_text, font)
 
     img = np.array(pil_img, dtype=np.uint8)
     img = cv2.flip(img, 0)
