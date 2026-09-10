@@ -582,7 +582,7 @@ def run(win, cap, frame, cam_w, cam_h, recording_machine):
                 if page_inset:
                     avoid = rect          # sentences flow around the capture
                 else:
-                    # thank-you: sits below the capture, which is still up
+                    # non-inset page: sits below the capture, still up
                     page_top = int(rect[3]) + config.INSET_GUTTER
             if (page_renderer is None or page_renderer.text != page_text
                     or page_renderer.align != page_align

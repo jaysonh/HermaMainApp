@@ -101,8 +101,8 @@ LOADING_OUTLINE_WIDTH = 3
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ASSETS_DIR = PROJECT_ROOT / "assets"
 FONT_PATH = str(ASSETS_DIR / "sylfaen.ttf")
-# Every on-screen overlay — instructions, organism (sentences, thank-you
-# message, organism name + description) and chat bubbles — uses Cascadia Code.
+# Every on-screen overlay — instructions, organism (sentences, organism name
+# + description) and chat bubbles — uses Cascadia Code.
 # Only the HUD status bar still uses FONT_PATH.
 OVERLAY_FONT_PATH = str(ASSETS_DIR / "CascadiaCode-Regular.ttf")
 # The instructions screen is set in the bold face instead.
@@ -117,7 +117,7 @@ LOGO_PATH = ASSETS_DIR / "LogoV2.png"
 # and WSL (/mnt/d/herma/...) alike; override with [sentences].video_path.
 END_VIDEO_PATH = str(PROJECT_ROOT.parent / "PlatesBlackButtons" / "Screen" / "BlankEndVideo.mp4")
 
-# How long the finished page stays up before the thank-you message.
+# How long the finished page stays up before the restart.
 SENTENCES_PAGE_HOLD = 8.0
 
 # The recording plays in the top-right of the sentences page, with the text
@@ -134,10 +134,6 @@ INSET_FALLBACK_ASPECT = 4 / 3
 INSET_SHADER_MARGIN = 0.05
 # Width of that fade, in uv units of the shader grid.
 INSET_SHADER_FEATHER = 0.05
-
-# Typed out the same way as the sentences, once the page is done.
-THANK_YOU_TEXT = "Thank you for your experience"
-THANK_YOU_HOLD = 10.0
 
 # Typing speed of the instructions screen, in characters per second.
 INSTRUCTIONS_CPS = 25.0

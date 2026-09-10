@@ -71,15 +71,15 @@ sentences_page_lock = threading.Lock()
 sentences_page_text = ""
 sentences_page_start = None   # time.monotonic() when typing began
 sentences_page_cps = 20.0     # characters per second
-sentences_page_align = "left"  # "left" for sentences, "center" for the thank-you
+sentences_page_align = "left"  # "left" for sentences, "center" to centre a page
 sentences_page_inset = False   # play the recording alongside this page?
 
 # Path of the still captured for this run, shown beside the sentences.
 recording_source_lock = threading.Lock()
 last_recording_source = None
 
-# While the page (and the thank-you that follows it) is up, the terrain shader
-# is replaced by a looping background video.
+# While the page is up, the terrain shader is replaced by a looping
+# background video.
 show_end_video = False
 
 # ─── Runtime-mutable Config ─────────────────────────────────────────────────

@@ -27,8 +27,8 @@ def _sentences_worker(sentences, seconds_per_char):
     Assumes ``state.show_organism`` was already set to True by /api/stop. The
     render loop does the typing — it derives the visible character count from
     the start time this publishes — so all this thread does is wait out the
-    reveal plus a hold. On finish (or stop), shows a thank-you message, sends
-    /api/restart to the SentiChat backend, and triggers a local restart.
+    reveal plus a hold. On finish (or stop), sends /api/restart to the
+    SentiChat backend and triggers a local restart.
     """
     try:
         page_text, cps, typing_seconds = _page_timings(sentences, seconds_per_char)
@@ -48,24 +48,13 @@ def _sentences_worker(sentences, seconds_per_char):
             time.sleep(0.1)
             elapsed += 0.1
     finally:
-        # Take the page down but leave the background video up — it plays under
-        # the thank-you too, until the restart below resets everything.
+        # Take the page down but leave the background video up — it plays on
+        # until the restart below resets everything.
         state.clear_sentences_page()
 
         with state.sentences_lock:
-            was_stopped = state.sentences_stop
             state.sentences_active = False
             state.sentences_stop = False
-
-        if not was_stopped:
-            thanks = config.THANK_YOU_TEXT
-            cps = _page_timings([thanks], seconds_per_char)[1]
-            state.start_sentences_page(thanks, cps, align="center")
-            typing = overlays.sentences_page_total_chars(thanks) / cps
-            print(f"API: Typing thank-you message ({typing:.1f}s "
-                  f"+{config.THANK_YOU_HOLD:.0f}s hold)")
-            time.sleep(typing + config.THANK_YOU_HOLD)
-            state.clear_sentences_page()
 
         try:
             parsed = urlparse(state.AWS_UPLOAD_URL)
